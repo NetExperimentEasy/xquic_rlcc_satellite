@@ -246,6 +246,8 @@ if(XQC_ENABLE_BBR2)
 
         ${CONGESTION_CONTROL_SOURCES}
         "src/congestion_control/xqc_bbr2.c"
+        # add rlcc here
+        "src/congestion_control/rlcc.c"
     )
 endif()
 
@@ -281,6 +283,7 @@ if(PLATFORM MATCHES "mac")
         ${SSL_LIB_PATH}
         "-Wl"
         -lpthread
+        -lhiredis
     )
 else()
     target_link_libraries(
@@ -289,6 +292,7 @@ else()
         ${SSL_LIB_PATH}
         "-Wl,--no-whole-archive"
         -lpthread
+        -lhiredis
     )
 endif()
 

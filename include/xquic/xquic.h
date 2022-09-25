@@ -679,6 +679,8 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_reno_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_bbr2_cb;
 #endif
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_bbr_cb;
+// add rlcc here
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_rlcc_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_cubic_cb;
 
 

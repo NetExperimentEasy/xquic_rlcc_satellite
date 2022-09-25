@@ -10,13 +10,22 @@
   
 #include <hiredis/hiredis.h>  
 
-#define XQC_RLCC_MSS               1460
-#define MONITOR_INTERVAL           100
-#define XQC_RLCC_INIT_WIN          (32 * XQC_RLCC_MSS)
-
+#define XQC_RLCC_MSS               	1460
+#define MONITOR_INTERVAL           	100
+#define XQC_RLCC_INIT_WIN          	(32 * XQC_RLCC_MSS)
+#define XQC_RLCC_MIN_WINDOW        	(4 * XQC_RLCC_MSS )
+#define cwnd_gain					2
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
 
+static void 
+xqc_rlcc_init_pacing_rate(xqc_rlcc_t *rlcc, xqc_sample_t *sampler)
+{
+    uint64_t bandwidth;
+    bandwidth = rlcc->cwnd * (uint64_t)MSEC2SEC
+        / (sampler->srtt ? sampler->srtt : 1000);
+    rlcc->pacing_rate = bandwidth;
+}
 
 static redisContext*
 getRedisConn()
@@ -31,29 +40,45 @@ getRedisConn()
 // CID训练的时候 python如何实时获得该流的CID信息
 
 static void
-pushState(redisContext* conn, string key, string value)
+pushState(redisContext* conn, char* key, char* value)
 {	
 	/* 先操作再上锁 */
-	redisReply* reply = redisCommand(conn, "HSET rlcc_9000 state %s", value);
-	reply = redisCommand(conn, "HSET rlcc_9000 lock 0");  
+	/* 先检查有无字段，无则新建 */
+	redisReply* reply = redisCommand(conn, "HGET %s lock", key);
+    // printf("? %d, %s\n",reply!=NULL, reply->str);
+    if(reply!=NULL && reply->str==NULL){
+        printf("There is no cid hset, create it\n");
+		redisReply* create = redisCommand(conn, "HSET %s lock 0 cwnd 0 pacing_rate 0 state null", "cidtest");
+		if (create!=NULL && create->type==REDIS_REPLY_ERROR) {
+			printf("Create Error %s\n", create->str);
+			return;
+		}else if(create==NULL){
+			printf("Unkown Error: %s\n", reply->str);	
+			return;
+		}
+        freeReplyObject(create);
+		printf("Create Success\n");
+    }
+
+	reply = redisCommand(conn, "HSET %s state %s lock 0", key, value);
     freeReplyObject(reply);
 }
 
 static void
-getAction(redisContext* conn, xqc_rlcc_t* rlcc)
+getAction(redisContext* conn, xqc_rlcc_t* rlcc, xqc_sample_t *sampler, char* key)
 {	
 	redisReply* lock;
 
     while(1){
         // 写入动作后，lock变为1，此时才可以读取动作
-        lock = redisCommand(conn, "HGET rlcc_9000 lock"); 
+        lock = redisCommand(conn, "HGET %s lock", key); 
         int lockvalue = atoi(lock->str);
         if(lockvalue==1){
-            redisReply* action = redisCommand(conn, "HGET rlcc_9000 cwnd");
+            redisReply* action = redisCommand(conn, "HGET %s cwnd", key);
 			rlcc->cwnd = atoi(action->str);
-			redisReply* action = redisCommand(conn, "HGET rlcc_9000 pacing_rate");
+			action = redisCommand(conn, "HGET %s pacing_rate", key);
 			rlcc->pacing_rate = atoi(action->str);
-            printf("current action is %d, pacing_rate is %d", rlcc->cwnd, rlcc->pacing_rate);
+            // printf("current action is %d, pacing_rate is %d", rlcc->cwnd, rlcc->pacing_rate);
             freeReplyObject(action);
             break;
         }
@@ -62,16 +87,22 @@ getAction(redisContext* conn, xqc_rlcc_t* rlcc)
     freeReplyObject(lock); 
 
 	/* 此处根据值进行进一步计算 */
-	if(rlcc->cwnd==0){
-		/* 根据pacing_rate计算窗口大小 */
+	if(rlcc->cwnd==0 && rlcc->pacing_rate!=0){
+		/* 只提供pacing_rate时，通过BDP去计算一个合适的窗口大小 */
+		// 是否合理？
+		rlcc->cwnd = cwnd_gain * rlcc->bandwidth * rlcc->min_rtt ;
 		return;
 	}
 
-	if(rlcc->pacing_rate==0){
+	if(rlcc->pacing_rate==0 && rlcc->cwnd!=0){
 		/* 根据cwnd计算pacing_rate大小 */
+		// 如果算法不需要pacing_rate，则客户端启动的时候，不要选择对应配置项
+		xqc_rlcc_init_pacing_rate(rlcc, sampler);
 		return;
 	}
 }
+
+
 
 static void
 xqc_rlcc_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params){
@@ -82,11 +113,10 @@ xqc_rlcc_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params){
 	xqc_connection_t *ctl_conn = send_ctl->ctl_conn;
 	
 	/* 初始化rlcc参数 */
-	rlcc->cwnd = XQC_CUBIC_INIT_WIN;
+	rlcc->cwnd = XQC_RLCC_INIT_WIN;
 	/* rfc 9000 选择dcid标识流较为合适 */
 	rlcc->original_dcid = ctl_conn->original_dcid;
     rlcc->time_stamp = xqc_monotonic_timestamp();
-	rlcc->pacing_rate = xqc_rlcc_init_pacing_gain * bandwidth;
 	rlcc->redis_conn = getRedisConn();
 	rlcc->rtt = send_ctl->ctl_latest_rtt; /* 不知道初始化的时候是多少 */
 	rlcc->srtt = send_ctl->ctl_srtt;
@@ -95,6 +125,7 @@ xqc_rlcc_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params){
 	rlcc->last_bandwidth = 0;
 	rlcc->prior_cwnd = rlcc->cwnd;
 	rlcc->min_rtt = rlcc->rtt;
+	xqc_rlcc_init_pacing_rate(rlcc, sampler);
 
 	pushState(rlcc->redis_conn, "tom", "jerry");
 }
@@ -103,7 +134,9 @@ static void
 xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 {
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-
+	xqc_send_ctl_t *send_ctl = sampler->send_ctl;
+    xqc_send_ctl_info_t *ctl_info = &send_ctl->ctl_info;
+	
 	// pacing_rate, cwnd 由动作去改变
 
 	/* 
@@ -132,11 +165,9 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 		/* 外部计算+写入redis需要一段时间 ； 获取动作按照redis里面的锁来*/
 		/* 此处阻塞来获取动作 */
-		getAction(rlcc->redis_conn, rlcc);
+		getAction(rlcc->redis_conn, rlcc, sampler, "tom");
 
 	}
-	
-	
 }
 
 static void 
@@ -147,14 +178,59 @@ xqc_rlcc_on_lost(void *cong_ctl, xqc_usec_t lost_sent_time)
 	return;
 }
 
+static uint64_t 
+xqc_rlcc_get_cwnd(void *cong_ctl)
+{
+    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+    return rlcc->cwnd;
+}
+
+static void 
+xqc_rlcc_reset_cwnd(void *cong_ctl)
+{
+    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+    rlcc->cwnd = XQC_RLCC_MIN_WINDOW;
+}
+
 size_t
 xqc_rlcc_size()
 {
     return sizeof(xqc_rlcc_t);
 }
 
+static uint32_t 
+xqc_rlcc_get_pacing_rate(void *cong_ctl)
+{
+    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 
+    return rlcc->pacing_rate;
+}
 
+static uint32_t 
+xqc_rlcc_get_bandwidth(void *cong_ctl)
+{
+    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+    return rlcc->bandwidth;
+}
+
+static void 
+xqc_rlcc_restart_from_idle(void *cong_ctl, uint64_t conn_delivered)
+{
+    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+    uint32_t rate;
+    uint64_t now = xqc_monotonic_timestamp();
+    xqc_sample_t sampler = {.now = now, .total_acked = conn_delivered};
+
+	if (rlcc->pacing_rate == 0) {
+		xqc_rlcc_init_pacing_rate(rlcc, &sampler);
+	}
+}
+
+static int
+xqc_rlcc_in_recovery(void *cong) {
+    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)cong;
+    return 0; // never have recovery state
+}
 
 const xqc_cong_ctrl_callback_t xqc_rlcc_cb = {
 	.xqc_cong_ctl_size              = xqc_rlcc_size,
@@ -173,4 +249,6 @@ const xqc_cong_ctrl_callback_t xqc_rlcc_cb = {
 	/* If the connection is in recovery state. */
     // .xqc_cong_ctl_in_recovery       = xqc_rlcc_in_recovery,
 	.xqc_cong_ctl_get_bandwidth_estimate  = xqc_rlcc_get_bandwidth,
+	.xqc_cong_ctl_restart_from_idle       = xqc_rlcc_restart_from_idle,
+    .xqc_cong_ctl_in_recovery             = xqc_rlcc_in_recovery,
 };

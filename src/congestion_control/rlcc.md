@@ -12,6 +12,8 @@ sudo apt install redis-server
 
 hiredis使用方法
 https://www.cnblogs.com/52fhy/p/9196527.html
+redis返回状态
+https://www.jianshu.com/p/361b6dd7261f
 
 
 

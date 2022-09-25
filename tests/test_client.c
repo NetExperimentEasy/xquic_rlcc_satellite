@@ -1961,7 +1961,7 @@ void usage(int argc, char *argv[]) {
 "   -p    Server port.\n"
 "   -P    Number of Parallel requests per single connection. Default 1.\n"
 "   -n    Total number of requests to send. Defaults 1.\n"
-"   -c    Congestion Control Algorithm. r:reno b:bbr c:cubic B:bbr2 bbr+ bbr2+\n"
+"   -c    Congestion Control Algorithm. r:reno b:bbr R:rlcc c:cubic B:bbr2 bbr+ bbr2+\n"
 "   -C    Pacing on.\n"
 "   -t    Connection timeout. Default 3 seconds.\n"
 "   -T    Transport layer. No HTTP3.\n"
@@ -2201,6 +2201,10 @@ int main(int argc, char *argv[]) {
         cong_ctrl = xqc_cubic_cb;
     }
 #ifdef XQC_ENABLE_BBR2
+    /* add rlcc here */
+    else if (c_cong_ctl == 'R') {
+        cong_ctrl = xqc_rlcc_cb;
+    }
     else if (c_cong_ctl == 'B') {
         cong_ctrl = xqc_bbr2_cb;
         cong_flags = XQC_BBR2_FLAG_NONE;
