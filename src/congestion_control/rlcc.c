@@ -35,10 +35,6 @@ getRedisConn()
 	return conn;
 }
 
-// 现在的问题 找不到 cong_ctl的结构体在哪里，应该是流的结构体
-// 用四元组的源地址端口？ 用CID标识？  多路径用path_id标识？
-// CID训练的时候 python如何实时获得该流的CID信息
-
 static void
 pushState(redisContext* conn, char* key, char* value)
 {	
@@ -86,6 +82,8 @@ getAction(redisContext* conn, xqc_rlcc_t* rlcc, xqc_sample_t *sampler, char* key
     
     freeReplyObject(lock); 
 
+	rlcc->cwnd = XQC_RLCC_INIT_WIN;
+	rlcc->pacing_rate = 0;
 	/* 此处根据值进行进一步计算 */
 	if(rlcc->cwnd==0 && rlcc->pacing_rate!=0){
 		/* 只提供pacing_rate时，通过BDP去计算一个合适的窗口大小 */
@@ -106,7 +104,9 @@ getAction(redisContext* conn, xqc_rlcc_t* rlcc, xqc_sample_t *sampler, char* key
 
 static void
 xqc_rlcc_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params){
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+    xqc_log(sampler->send_ctl->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: init");
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	memset(rlcc, 0, sizeof(*rlcc));
 
 	xqc_send_ctl_t *send_ctl = sampler->send_ctl;
@@ -127,15 +127,19 @@ xqc_rlcc_init(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params){
 	rlcc->min_rtt = rlcc->rtt;
 	xqc_rlcc_init_pacing_rate(rlcc, sampler);
 
+	rlcc->ctl_conn = ctl_conn;
+
 	pushState(rlcc->redis_conn, "tom", "jerry");
 }
 
 static void
 xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
-{
+{	
+	xqc_log(sampler->send_ctl->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: on ack");
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	xqc_send_ctl_t *send_ctl = sampler->send_ctl;
-    xqc_send_ctl_info_t *ctl_info = &send_ctl->ctl_info;
+    // xqc_send_ctl_info_t *ctl_info = &send_ctl->ctl_info;
 	
 	// pacing_rate, cwnd 由动作去改变
 
@@ -147,7 +151,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	后续需要验证这个时间间隔变化 是否会影响马尔可夫性
 	*/
 	xqc_usec_t now = xqc_monotonic_timestamp();
-	if(rlcc->time_stamp + ctl_info->record_interval <= now){
+	// if(rlcc->time_stamp + ctl_info->record_interval <= now){
+	if(rlcc->time_stamp + 100000 <= now){
 		rlcc->time_stamp = now;
 		// 是每个运行的时间间隔更新一次统计值，执行一次动作，而不是每个ack
 		rlcc->time_stamp = sampler->now;
@@ -172,23 +177,29 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 static void 
 xqc_rlcc_on_lost(void *cong_ctl, xqc_usec_t lost_sent_time)
-{
+{	
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: on lost");
     /* xqc_bbr 超过目标窗口后如果发生丢包，算法就不会增加窗口了 */
 	/* rlcc这里因为要算法全托管给rl，所以这里不做操作 */
-	return;
 }
 
 static uint64_t 
 xqc_rlcc_get_cwnd(void *cong_ctl)
-{
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+{	
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: get cwnd");
     return rlcc->cwnd;
 }
 
 static void 
 xqc_rlcc_reset_cwnd(void *cong_ctl)
-{
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+{	
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: reset cwnd");
     rlcc->cwnd = XQC_RLCC_MIN_WINDOW;
 }
 
@@ -200,23 +211,29 @@ xqc_rlcc_size()
 
 static uint32_t 
 xqc_rlcc_get_pacing_rate(void *cong_ctl)
-{
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+{	
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: get pacing rate");
 
     return rlcc->pacing_rate;
 }
 
 static uint32_t 
 xqc_rlcc_get_bandwidth(void *cong_ctl)
-{
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+{	
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: on get bandwidth");
     return rlcc->bandwidth;
 }
 
 static void 
 xqc_rlcc_restart_from_idle(void *cong_ctl, uint64_t conn_delivered)
-{
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+{	
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: restart from idle");
     uint32_t rate;
     uint64_t now = xqc_monotonic_timestamp();
     xqc_sample_t sampler = {.now = now, .total_acked = conn_delivered};
@@ -228,7 +245,9 @@ xqc_rlcc_restart_from_idle(void *cong_ctl, uint64_t conn_delivered)
 
 static int
 xqc_rlcc_in_recovery(void *cong) {
-    xqc_rlcc_t *rlcc = (xqc_rlcc_t *)cong;
+	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong);
+	xqc_log(rlcc->ctl_conn->log, XQC_LOG_DEBUG, 
+                "|RLCC: on recovery");
     return 0; // never have recovery state
 }
 

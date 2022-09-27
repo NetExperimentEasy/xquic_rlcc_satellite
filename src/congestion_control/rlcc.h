@@ -2,8 +2,8 @@
  * @copyright Copyright (c) 2022, jinyaoliu 
  */
 
-#ifndef _PLUGINIZED_CC_H_INCLUDED_
-#define _PLUGINIZED_CC_H_INCLUDED_
+#ifndef _RLCC_CC_H_INCLUDED_
+#define _RLCC_CC_H_INCLUDED_
 
 #include <xquic/xquic_typedef.h>
 #include <xquic/xquic.h>
@@ -13,7 +13,7 @@
 
 #define MSEC2SEC 1000000
 
-typedef struct {
+typedef struct xqc_rlcc_s {
     uint32_t                cwnd;
     /* Current pacing rate */
     uint32_t                pacing_rate;
@@ -32,8 +32,10 @@ typedef struct {
     uint32_t                last_bandwidth;
     xqc_cid_t               original_dcid;
     
+    /* debug */
+    xqc_connection_t        *ctl_conn;
 } xqc_rlcc_t;
 
 extern const xqc_cong_ctrl_callback_t xqc_rlcc_cb;
 
-#endif /* _XQC_CUBIC_H_INCLUDED_ */
+#endif /* _XQC_RLCC_H_INCLUDED_ */

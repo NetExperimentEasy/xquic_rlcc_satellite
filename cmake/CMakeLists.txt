@@ -246,6 +246,8 @@ if (XQC_ENABLE_BBR2)
         CONGESTION_CONTROL_SOURCES
         ${CONGESTION_CONTROL_SOURCES}
         "src/congestion_control/xqc_bbr2.c"
+        # add rlcc here
+        "src/congestion_control/rlcc.c"
     )
 endif()
 
