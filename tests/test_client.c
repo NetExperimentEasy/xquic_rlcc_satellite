@@ -2226,7 +2226,7 @@ int main(int argc, char *argv[]) {
         .pacing_on  =   pacing_on,
         .ping_on    =   0,
         .cong_ctrl_callback = cong_ctrl,
-        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags},
+        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag=1234},
         //.so_sndbuf  =   1024*1024,
         .proto_version = XQC_VERSION_V1,
         .spurious_loss_detect_on = 0,
