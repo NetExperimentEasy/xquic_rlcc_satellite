@@ -102,6 +102,7 @@ int g_save_body;
 int g_read_body;
 int g_spec_url;
 int g_test_case;
+int g_rlcc_flag; // rlcc_flag
 int g_ipv6;
 int g_batch=0;
 int g_lb_cid_encryption_on = 0;
@@ -1228,6 +1229,7 @@ void usage(int argc, char *argv[]) {
 "   -E    load balance id encryption on\n"
 "   -K    load balance id encryption key\n"
 "   -o    Output log file path, default ./slog\n"
+"   -f    rlcc_path_flag, default 1234 \n"
 , prog);
 }
 
@@ -1240,6 +1242,7 @@ int main(int argc, char *argv[]) {
     g_save_body = 0;
     g_read_body = 0;
     g_spec_url = 0;
+    g_rlcc_flag = 1234; // rlcc_flag default is 1234
     g_ipv6 = 0;
 
     int server_port = TEST_PORT;
@@ -1250,7 +1253,7 @@ int main(int argc, char *argv[]) {
     strncpy(g_log_path, "./slog", sizeof(g_log_path));
 
     int ch = 0;
-    while ((ch = getopt(argc, argv, "p:ec:Cs:w:r:l:u:x:6bS:o:EK:")) != -1) {
+    while ((ch = getopt(argc, argv, "p:ec:Cs:w:r:l:u:x:6bS:o:EK:f")) != -1) {
         switch (ch) {
         case 'p': /* Server port. */
             printf("option port :%s\n", optarg);
@@ -1334,6 +1337,10 @@ int main(int argc, char *argv[]) {
         case 'E': /* set lb_cid encryption on */
             printf("set lb-cid encryption on \n");
             g_lb_cid_encryption_on = 1;
+            break;
+        case 'f':
+            printf("option rlcc_flag :%s\n", optarg);
+            g_rlcc_flag = atoi(optarg);
             break;
         default:
             printf("other option :%c\n", ch);
@@ -1430,7 +1437,7 @@ int main(int argc, char *argv[]) {
     xqc_conn_settings_t conn_settings = {
         .pacing_on  =   pacing_on,
         .cong_ctrl_callback = cong_ctrl,
-        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags},
+        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag = g_rlcc_flag},
         .spurious_loss_detect_on = 0,
     };
 

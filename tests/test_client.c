@@ -143,6 +143,7 @@ int g_save_body;
 int g_read_body;
 int g_echo_check;
 int g_drop_rate;
+int g_rlcc_flag; // rlcc_flag, use for rlcc 
 int g_spec_url;
 int g_is_get;
 uint64_t g_last_sock_op_time;
@@ -1982,6 +1983,7 @@ void usage(int argc, char *argv[]) {
 "   -V    Force cert verification. 0: don't allow self-signed cert. 1: allow self-signed cert.\n"
 "   -q    name-value pair num of request header, default and larger than 6\n"
 "   -o    Output log file path, default ./clog\n"
+"   -f    rlcc_path_flag, default 1234 \n"
 , prog);
 }
 
@@ -1995,6 +1997,7 @@ int main(int argc, char *argv[]) {
     g_read_body = 0;
     g_echo_check = 0;
     g_drop_rate = 0;
+    g_rlcc_flag = 1234; // rlcc_flag default is 1234
     g_spec_url = 0;
     g_is_get = 0;
     g_test_case = 0;
@@ -2013,7 +2016,7 @@ int main(int argc, char *argv[]) {
     strcpy(g_log_path, "./clog");
 
     int ch = 0;
-    while ((ch = getopt(argc, argv, "a:p:P:n:c:Ct:T1s:w:r:l:Ed:u:H:h:Gx:6NMi:V:q:o:")) != -1) {
+    while ((ch = getopt(argc, argv, "a:p:P:n:c:Ct:T1s:w:r:l:Ed:u:H:h:Gx:6NMi:V:q:o:f:")) != -1) {
         switch (ch) {
         case 'a': /* Server addr. */
             printf("option addr :%s\n", optarg);
@@ -2136,6 +2139,10 @@ int main(int argc, char *argv[]) {
             printf("option log path :%s\n", optarg);
             snprintf(g_log_path, sizeof(g_log_path), optarg);
             break;
+        case 'f':
+            printf("option rlcc_flag :%s\n", optarg);
+            g_rlcc_flag = atoi(optarg);
+            break;
         default:
             printf("other option :%c\n", ch);
             usage(argc, argv);
@@ -2226,7 +2233,7 @@ int main(int argc, char *argv[]) {
         .pacing_on  =   pacing_on,
         .ping_on    =   0,
         .cong_ctrl_callback = cong_ctrl,
-        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag=1234},
+        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag = g_rlcc_flag},
         //.so_sndbuf  =   1024*1024,
         .proto_version = XQC_VERSION_V1,
         .spurious_loss_detect_on = 0,
