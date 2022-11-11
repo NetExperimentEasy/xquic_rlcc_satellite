@@ -96,6 +96,8 @@ typedef struct xqc_server_ctx_s {
 
 xqc_server_ctx_t ctx;
 struct event_base *eb;
+double g_copa_ai = 1.0;
+double g_copa_delta = 0.05;
 int g_echo = 0;
 int g_send_body_size;
 int g_send_body_size_defined;
@@ -1219,7 +1221,9 @@ void usage(int argc, char *argv[]) {
 "Options:\n"
 "   -p    Server port.\n"
 "   -e    Echo. Send received body.\n"
-"   -c    Congestion Control Algorithm. r:reno b:bbr R:rlcc c:cubic B:bbr2 bbr+ bbr2+\n"
+"   -c    Congestion Control Algorithm. r:reno b:bbr R:rlcc c:cubic P:copa B:bbr2 bbr+ bbr2+\n"
+"   -A    Copa parameter (additive increase unit)\n"
+"   -D    Copa paramter (delta)\n"
 "   -C    Pacing on.\n"
 "   -s    Body size to send.\n"
 "   -w    Write received body to file.\n"
@@ -1250,6 +1254,7 @@ int main(int argc, char *argv[]) {
     g_spec_url = 0;
     g_rlcc_flag = 1234; // rlcc_flag default is 1234
     g_ipv6 = 0;
+    g_copa_delta = 0.05;
 
     int server_port = TEST_PORT;
     char c_cong_ctl = 'b';
@@ -1259,8 +1264,26 @@ int main(int argc, char *argv[]) {
     strncpy(g_log_path, "./slog", sizeof(g_log_path));
 
     int ch = 0;
-    while ((ch = getopt(argc, argv, "p:ec:Cs:w:r:l:u:x:6bS:o:EK:f:R:")) != -1) {
+    while ((ch = getopt(argc, argv, "p:ec:Cs:w:r:l:u:x:6bS:o:EK:A:D:f:R:")) != -1) {
         switch (ch) {
+        case 'A':
+            g_copa_ai = atof(optarg);
+            if (g_copa_ai < 1.0) {
+                printf("option g_copa_ai must be greater than 1.0\n");
+                exit(0);
+            } else {
+                printf("option g_copa_ai: %.4lf\n", g_copa_ai);
+            }
+            break;
+        case 'D':
+            g_copa_delta = atof(optarg);
+            if (g_copa_delta <= 0 || g_copa_delta > 0.5) {
+                printf("option g_copa_delta must be in (0, 0.5]\n");
+                exit(0);
+            } else {
+                printf("option g_copa_delta: %.4lf\n", g_copa_delta);
+            }
+            break;
         case 'p': /* Server port. */
             printf("option port :%s\n", optarg);
             server_port = atoi(optarg);
@@ -1426,7 +1449,9 @@ int main(int argc, char *argv[]) {
 #endif
     else if (c_cong_ctl == 'c') {
         cong_ctrl = xqc_cubic_cb;
-    }
+    } else if (c_cong_ctl == 'P') {
+        cong_ctrl = xqc_copa_cb;
+    } 
 #ifdef XQC_ENABLE_BBR2
     /* add rlcc here */
     else if (c_cong_ctl == 'R') {
@@ -1451,7 +1476,13 @@ int main(int argc, char *argv[]) {
     xqc_conn_settings_t conn_settings = {
         .pacing_on  =   pacing_on,
         .cong_ctrl_callback = cong_ctrl,
-        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag = g_rlcc_flag, .redis_host = g_redis_host, .redis_port = g_redis_port},
+        .cc_params = {
+            .customize_on = 1, 
+            .init_cwnd = 32, 
+            .cc_optimization_flags = cong_flags,
+            .copa_delta_ai_unit = g_copa_ai,
+            .copa_delta_base = g_copa_delta,
+            .rlcc_path_flag = g_rlcc_flag, .redis_host = g_redis_host, .redis_port = g_redis_port},
         .spurious_loss_detect_on = 0,
     };
 
@@ -1474,7 +1505,15 @@ int main(int argc, char *argv[]) {
     if (xqc_engine_get_default_config(&config, XQC_ENGINE_SERVER) < 0) {
         return -1;
     }
-    config.cfg_log_level = c_log_level == 'e' ? XQC_LOG_ERROR : (c_log_level == 'i' ? XQC_LOG_INFO : c_log_level == 'w'? XQC_LOG_WARN: XQC_LOG_DEBUG);
+
+    switch(c_log_level) {
+        case 'e': config.cfg_log_level = XQC_LOG_ERROR; break;
+        case 'i': config.cfg_log_level = XQC_LOG_INFO; break;
+        case 'w': config.cfg_log_level = XQC_LOG_WARN; break;
+        case 's': config.cfg_log_level = XQC_LOG_STATS; break;
+        case 'd': config.cfg_log_level = XQC_LOG_DEBUG; break;
+        default: config.cfg_log_level = XQC_LOG_DEBUG;
+    }
 
     eb = event_base_new();
     ctx.ev_engine = event_new(eb, -1, 0, xqc_server_engine_callback, &ctx);

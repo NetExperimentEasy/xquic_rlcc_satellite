@@ -72,7 +72,7 @@ XQUIC supports both BabaSSL and BoringSSL.
 
 ```bash
 # get XQUIC source code
-git clone git@github.com:alibaba/xquic.git
+git clone https://github.com/alibaba/xquic.git
 cd xquic
 
 # get and build BoringSSL
@@ -102,11 +102,11 @@ cmake -DGCOV=on -DCMAKE_BUILD_TYPE=Release -DXQC_ENABLE_TESTING=1 -DXQC_SUPPORT_
 
 ```bash
 # get XQUIC source code
-git clone git@github.com:alibaba/xquic.git
+git clone https://github.com/alibaba/xquic.git
 cd xquic
 
 # get and build BabaSSL
-git clone git@github.com:BabaSSL/BabaSSL.git ./third_party/babassl
+git clone -b 8.3-stable https://github.com/Tongsuo-Project/Tongsuo.git ./third_party/babassl
 cd ./third_party/babassl/
 ./config --prefix=/usr/local/babassl
 make -j

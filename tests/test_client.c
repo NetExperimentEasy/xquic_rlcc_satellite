@@ -172,6 +172,8 @@ int g_verify_cert_allow_self_sign = 0;
 int g_header_num = 6;
 char g_header_key[MAX_HEADER_KEY_LEN];
 char g_header_value[MAX_HEADER_VALUE_LEN];
+double g_copa_ai = 1.0;
+double g_copa_delta = 0.05;
 
 char g_multi_interface[XQC_DEMO_MAX_PATH_COUNT][64];
 xqc_user_path_t g_client_path[XQC_DEMO_MAX_PATH_COUNT];
@@ -1966,7 +1968,9 @@ void usage(int argc, char *argv[]) {
 "   -p    Server port.\n"
 "   -P    Number of Parallel requests per single connection. Default 1.\n"
 "   -n    Total number of requests to send. Defaults 1.\n"
-"   -c    Congestion Control Algorithm. r:reno b:bbr R:rlcc c:cubic B:bbr2 bbr+ bbr2+\n"
+"   -c    Congestion Control Algorithm. r:reno b:bbr R:rlcc c:cubic P:copa B:bbr2 bbr+ bbr2+\n"
+"   -A    Copa parameter (additive increase unit)\n"
+"   -D    Copa paramter (delta)\n"
 "   -C    Pacing on.\n"
 "   -t    Connection timeout. Default 3 seconds.\n"
 "   -T    Transport layer. No HTTP3.\n"
@@ -2009,6 +2013,8 @@ int main(int argc, char *argv[]) {
     g_test_case = 0;
     g_ipv6 = 0;
     g_no_crypt = 0;
+    g_copa_ai = 1.0;
+    g_copa_delta = 0.05;
 
     char server_addr[64] = TEST_SERVER_ADDR;
     int server_port = TEST_SERVER_PORT;
@@ -2022,8 +2028,26 @@ int main(int argc, char *argv[]) {
     strcpy(g_log_path, "./clog");
 
     int ch = 0;
-    while ((ch = getopt(argc, argv, "a:p:P:n:c:Ct:T1s:w:r:l:Ed:u:H:h:Gx:6NMi:V:q:o:f:R:")) != -1) {
+    while ((ch = getopt(argc, argv, "a:p:P:n:c:Ct:T1s:w:r:l:Ed:u:H:h:Gx:6NMi:V:q:o:A:D:f:R:")) != -1) {
         switch (ch) {
+        case 'A':
+            g_copa_ai = atof(optarg);
+            if (g_copa_ai < 1.0) {
+                printf("option g_copa_ai must be greater than 1.0\n");
+                exit(0);
+            } else {
+                printf("option g_copa_ai: %.4lf\n", g_copa_ai);
+            }
+            break;
+        case 'D':
+            g_copa_delta = atof(optarg);
+            if (g_copa_delta <= 0 || g_copa_delta > 0.5) {
+                printf("option g_copa_delta must be in (0, 0.5]\n");
+                exit(0);
+            } else {
+                printf("option g_copa_delta: %.4lf\n", g_copa_delta);
+            }
+            break;
         case 'a': /* Server addr. */
             printf("option addr :%s\n", optarg);
             snprintf(server_addr, sizeof(server_addr), optarg);
@@ -2220,7 +2244,9 @@ int main(int argc, char *argv[]) {
 #endif
     else if (c_cong_ctl == 'c') {
         cong_ctrl = xqc_cubic_cb;
-    }
+    } else if (c_cong_ctl == 'P') {
+        cong_ctrl = xqc_copa_cb;  
+    } 
 #ifdef XQC_ENABLE_BBR2
     /* add rlcc here */
     else if (c_cong_ctl == 'R') {
@@ -2238,7 +2264,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
     else {
-        printf("unknown cong_ctrl, option is b, r, c, B, bbr+, bbr2+\n");
+        printf("unknown cong_ctrl, option is b, r, c, B, bbr+, bbr2+, P\n");
         return -1;
     }
     printf("congestion control flags: %x\n", cong_flags);
@@ -2247,7 +2273,13 @@ int main(int argc, char *argv[]) {
         .pacing_on  =   pacing_on,
         .ping_on    =   0,
         .cong_ctrl_callback = cong_ctrl,
-        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag = g_rlcc_flag, .redis_host = g_redis_host, .redis_port = g_redis_port},
+        .cc_params  =   {
+            .customize_on = 1, 
+            .init_cwnd = 32, 
+            .cc_optimization_flags = cong_flags, 
+            .copa_delta_ai_unit = g_copa_ai, 
+            .copa_delta_base = g_copa_delta,
+            .rlcc_path_flag = g_rlcc_flag, .redis_host = g_redis_host, .redis_port = g_redis_port},
         //.so_sndbuf  =   1024*1024,
         .proto_version = XQC_VERSION_V1,
         .spurious_loss_detect_on = 0,
@@ -2258,8 +2290,15 @@ int main(int argc, char *argv[]) {
     if (xqc_engine_get_default_config(&config, XQC_ENGINE_CLIENT) < 0) {
         return -1;
     }
-    config.cfg_log_level = c_log_level == 'e' ? XQC_LOG_ERROR : (c_log_level == 'i' ? XQC_LOG_INFO : c_log_level == 'w'? XQC_LOG_STATS: XQC_LOG_DEBUG);
 
+    switch(c_log_level) {
+        case 'e': config.cfg_log_level = XQC_LOG_ERROR; break;
+        case 'i': config.cfg_log_level = XQC_LOG_INFO; break;
+        case 'w': config.cfg_log_level = XQC_LOG_WARN; break;
+        case 's': config.cfg_log_level = XQC_LOG_STATS; break;
+        case 'd': config.cfg_log_level = XQC_LOG_DEBUG; break;
+        default: config.cfg_log_level = XQC_LOG_DEBUG;
+    }
     /* test different cid_len */
     if (g_test_case == 13) {
         config.cid_len = XQC_MAX_CID_LEN;
