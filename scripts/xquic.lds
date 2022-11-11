@@ -55,11 +55,8 @@ XQUIC_VERS_1.0 {
         xqc_reno_cb;
         xqc_cubic_cb;
         xqc_copa_cb;
-<<<<<<< HEAD
         xqc_rlcc_cb;
-=======
         xqc_copa_cb;
->>>>>>> 2d4af1600ade0fb6234cf43478d84fac8e90acf9
         xqc_conn_is_ready_to_send_early_data;
         xqc_h3_conn_send_ping;
         xqc_conn_send_ping;
