@@ -76,7 +76,7 @@ git clone git@github.com:alibaba/xquic.git
 cd xquic
 
 # get and build BoringSSL
-git clone git@github.com:google/boringssl.git ./third_party/boringssl
+git clone https://github.com/google/boringssl.git ./third_party/boringssl
 cd ./third_party/boringssl
 mkdir -p build && cd build
 cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..

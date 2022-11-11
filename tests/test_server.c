@@ -42,7 +42,8 @@ printf_null(const char *format, ...)
 #define TEST_PORT 8443
 
 #define XQC_PACKET_TMP_BUF_LEN 1500
-#define MAX_BUF_SIZE (100*1024*1024)
+// #define MAX_BUF_SIZE (100*1024*1024)
+#define MAX_BUF_SIZE (1000*1024*1024)
 
 #define XQC_ALPN_TRANSPORT "transport"
 
@@ -103,6 +104,9 @@ int g_read_body;
 int g_spec_url;
 int g_test_case;
 int g_rlcc_flag; // rlcc_flag
+char g_redis_url[64];
+char g_redis_host[64] = "127.0.0.1";
+int g_redis_port = 6379;
 int g_ipv6;
 int g_batch=0;
 int g_lb_cid_encryption_on = 0;
@@ -1230,6 +1234,8 @@ void usage(int argc, char *argv[]) {
 "   -K    load balance id encryption key\n"
 "   -o    Output log file path, default ./slog\n"
 "   -f    rlcc_path_flag, default 1234 \n"
+"   -R    redis server, ip:port \n"
+"   if you use the rlcc, you must set a valid redis server, or it will throw a segmentation error\n"
 , prog);
 }
 
@@ -1253,7 +1259,7 @@ int main(int argc, char *argv[]) {
     strncpy(g_log_path, "./slog", sizeof(g_log_path));
 
     int ch = 0;
-    while ((ch = getopt(argc, argv, "p:ec:Cs:w:r:l:u:x:6bS:o:EK:f")) != -1) {
+    while ((ch = getopt(argc, argv, "p:ec:Cs:w:r:l:u:x:6bS:o:EK:f:R:")) != -1) {
         switch (ch) {
         case 'p': /* Server port. */
             printf("option port :%s\n", optarg);
@@ -1341,6 +1347,14 @@ int main(int argc, char *argv[]) {
         case 'f':
             printf("option rlcc_flag :%s\n", optarg);
             g_rlcc_flag = atoi(optarg);
+            break;
+        case 'R':
+            printf("option rlcc_redis_server :%s\n", optarg);
+            snprintf(g_redis_url, sizeof(g_redis_url), optarg);
+            char port[8];
+            sscanf(g_redis_url, "%[^:]:%s", g_redis_host, port);
+            g_redis_port = atoi(port);
+            printf("host is %s, port is %d\n", g_redis_host, g_redis_port);
             break;
         default:
             printf("other option :%c\n", ch);
@@ -1437,7 +1451,7 @@ int main(int argc, char *argv[]) {
     xqc_conn_settings_t conn_settings = {
         .pacing_on  =   pacing_on,
         .cong_ctrl_callback = cong_ctrl,
-        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag = g_rlcc_flag},
+        .cc_params  =   {.customize_on = 1, .init_cwnd = 32, .cc_optimization_flags = cong_flags, .rlcc_path_flag = g_rlcc_flag, .redis_host = g_redis_host, .redis_port = g_redis_port},
         .spurious_loss_detect_on = 0,
     };
 

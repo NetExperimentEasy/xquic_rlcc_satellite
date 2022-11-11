@@ -628,6 +628,8 @@ typedef struct xqc_cc_params_s {
     uint32_t    max_expect_bw;
     uint32_t    cc_optimization_flags;
     uint32_t    rlcc_path_flag;
+    char        *redis_host;
+    uint32_t    redis_port;
 } xqc_cc_params_t;
 
 typedef struct xqc_congestion_control_callback_s {

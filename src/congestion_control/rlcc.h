@@ -20,13 +20,17 @@ typedef struct xqc_rlcc_s {
     redisContext*           redis_conn_listener;
     redisContext*           redis_conn_publisher;
     void*                   reply; // subscribe
+    char*                   redis_host;
+    uint32_t                redis_port;
 
     /* sample state */
     xqc_usec_t              timestamp;
     xqc_usec_t              rtt;
-    uint64_t                lost;
+    uint32_t                rlcc_lost;       // rlcc on_lost方法最近100ms的调用次数
+    uint64_t                last_po_lost;   // 上次的po_lost
+    uint32_t                recent_lost;    // 根据po_lost计算的最近100ms的丢包数
     xqc_usec_t              srtt;
-    uint32_t                bandwidth;
+    uint32_t                throughput;
     uint32_t                last_delivered;
     uint64_t                inflight;
     uint32_t                prior_cwnd;
