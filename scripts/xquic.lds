@@ -54,6 +54,7 @@ XQUIC_VERS_1.0 {
         xqc_bbr2_cb;
         xqc_reno_cb;
         xqc_cubic_cb;
+        xqc_copa_cb;
 <<<<<<< HEAD
         xqc_rlcc_cb;
 =======
