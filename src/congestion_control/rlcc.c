@@ -7,6 +7,7 @@
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
 #include "src/congestion_control/xqc_sample.h"
+#include "pthread.h"
   
 #include <hiredis/hiredis.h>  
 
@@ -60,11 +61,16 @@ static void
 getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 {	
 	int i;
-	uint32_t add_cwnd;
+	// uint32_t add_cwnd;
+	float add_cwnd;
 	if(reply->type == REDIS_REPLY_ARRAY) {
 		// printf("%s\n", reply->element[2]->str);
-		sscanf(reply->element[2]->str, "%d,%d", &add_cwnd, &rlcc->pacing_rate);
-		rlcc->cwnd += add_cwnd * XQC_RLCC_MSS;		// 改成加减动作
+		sscanf(reply->element[2]->str, "%f,%d", &add_cwnd, &rlcc->pacing_rate);
+		// rlcc->cwnd += add_cwnd * XQC_RLCC_MSS;		// 改成加减动作
+		rlcc->cwnd *= add_cwnd;						// 倍率乘性动作
+		if(rlcc->cwnd < 4*XQC_RLCC_MSS){
+			rlcc->cwnd = 4*XQC_RLCC_MSS;		// 保障最基本的吞吐
+		}
 		// printf("cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
 	}
 }
@@ -197,7 +203,15 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_packet_out_t *po, xqc_usec_t now)
 
 		if(rlcc->rlcc_path_flag){
 			char value[500] = {0};
-			sprintf(value, "throughput:%d;rtt:%ld;srtt:%ld;inflight:%ld;rlcclost:%d;recent_lost:%d;is_app_limited:%d",
+			// sprintf(value, "throughput:%d;rtt:%ld;srtt:%ld;inflight:%ld;rlcclost:%d;recent_lost:%d;is_app_limited:%d",
+			// 	rlcc->throughput,
+			// 	rlcc->rtt, 
+			// 	rlcc->srtt, 
+			// 	rlcc->inflight, 
+			// 	rlcc->rlcc_lost,
+			// 	rlcc->recent_lost,
+			// 	po->po_is_app_limited);
+			sprintf(value, "%d;%ld;%ld;%ld;%d;%d;%d",
 				rlcc->throughput,
 				rlcc->rtt, 
 				rlcc->srtt, 
