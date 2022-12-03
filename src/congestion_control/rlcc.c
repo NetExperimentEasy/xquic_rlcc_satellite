@@ -8,25 +8,41 @@
 #include <xquic/xquic_typedef.h>
 #include "src/congestion_control/xqc_sample.h"
 #include "pthread.h"
-  
+#include <time.h>
 #include <hiredis/hiredis.h>  
 
 #define XQC_RLCC_MSS               	1460
 #define MONITOR_INTERVAL           	100
 #define XQC_RLCC_INIT_WIN          	(32 * XQC_RLCC_MSS)
 #define XQC_RLCC_MIN_WINDOW        	(4 * XQC_RLCC_MSS )
-#define cwnd_gain					2
+#define CWND_GAIN					1.2
 #define XQC_RLCC_INF             	0x7fffffff
+#define SAMPLE_INTERVAL				100000		// 100ms
+// #define SAMPLE_INTERVAL				1000000		// 1000ms
+#define PROBE_INTERVAL				2000000		// 2s
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
 
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void 
-xqc_rlcc_init_pacing_rate(xqc_rlcc_t *rlcc, xqc_sample_t *sampler)
-{
-    uint64_t bandwidth;
-    bandwidth = rlcc->cwnd * (uint64_t)MSEC2SEC
-        / (sampler->srtt ? sampler->srtt : 1000);
-    rlcc->pacing_rate = bandwidth;
+xqc_rlcc_cac_pacing_rate_by_cwnd(xqc_rlcc_t *rlcc)
+{	
+    rlcc->pacing_rate = rlcc->cwnd * (uint64_t)MSEC2SEC
+        / (rlcc->srtt ? rlcc->srtt : 1000);
+	rlcc->pacing_rate = xqc_max(rlcc->pacing_rate, XQC_RLCC_MSS);
+	return;
+}
+
+static void 
+xqc_rlcc_cac_cwnd_by_pacing_rate(xqc_rlcc_t *rlcc)
+{	
+	// pacing rate 计算有问题
+	printf("cacu : before cwnd %d, pacing_rate : %d, srtt : %ld, MSE : %d\n", rlcc->cwnd, rlcc->pacing_rate, rlcc->srtt, MSEC2SEC);
+    rlcc->cwnd = CWND_GAIN * rlcc->pacing_rate * (rlcc->srtt ? rlcc->srtt : 1000) / (uint64_t)MSEC2SEC;
+	rlcc->cwnd = xqc_max(rlcc->cwnd, XQC_RLCC_MIN_WINDOW);
+	return;
 }
 
 static void
@@ -44,6 +60,8 @@ getRedisConn(xqc_rlcc_t* rlcc)
 		printf("connection error:%s\n", rlcc->redis_conn_publisher->errstr);
 		redisFree(rlcc->redis_conn_publisher);
 	}
+
+	return;
 }
 
 static void
@@ -55,24 +73,49 @@ pushState(redisContext* conn, u_int32_t key, char* value)
  	reply = redisCommand(conn, "PUBLISH rlccstate_%d %s", key, value);
 
     if (reply!=NULL) freeReplyObject(reply);
+
+	return;
 }
 
 static void
 getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 {	
-	int i;
-	// uint32_t add_cwnd;
-	float add_cwnd;
+	float cwnd_rate;
+	float pacing_rate_rate;
 	if(reply->type == REDIS_REPLY_ARRAY) {
 		// printf("%s\n", reply->element[2]->str);
-		sscanf(reply->element[2]->str, "%f,%d", &add_cwnd, &rlcc->pacing_rate);
-		// rlcc->cwnd += add_cwnd * XQC_RLCC_MSS;		// 改成加减动作
-		rlcc->cwnd *= add_cwnd;						// 倍率乘性动作
-		if(rlcc->cwnd < 4*XQC_RLCC_MSS){
-			rlcc->cwnd = 4*XQC_RLCC_MSS;		// 保障最基本的吞吐
+
+		printf("before cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
+
+		// cwnd_rate : (0, +INF), pacing_rate_rate : (0, +INF); if value is 0, means that set it auto
+		sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
+		
+		// printf("%f, %d ; %f, %d\n", cwnd_rate, (cwnd_rate!=0), pacing_rate_rate, (pacing_rate_rate!=0));
+
+		if(cwnd_rate!=0){
+			rlcc->cwnd *= cwnd_rate;
+			if(rlcc->cwnd < XQC_RLCC_MIN_WINDOW){
+				rlcc->cwnd = XQC_RLCC_MIN_WINDOW;		// base cwnd
+			}
 		}
-		// printf("cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
+
+		if(pacing_rate_rate!=0){		// use pacing
+			rlcc->pacing_rate *= pacing_rate_rate;
+			// TODO: base pacing rate needed
+		}
+		
+		if(cwnd_rate==0){
+			xqc_rlcc_cac_cwnd_by_pacing_rate(rlcc);
+		}
+
+		if(pacing_rate_rate==0){					// use cwnd update pacing_rate
+			xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
+		}
+
+		printf("after cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
 	}
+
+	return;
 }
 
 static void
@@ -90,35 +133,31 @@ subscribe(redisContext* conn, xqc_rlcc_t* rlcc)
     } else {
         freeReplyObject(rlcc->reply);
 	}
+
+	return;
 }
 
-static void
-getAction(redisContext* conn, xqc_rlcc_t* rlcc, void *reply, u_int32_t key)
+void*
+getActionT(void* arg)
 {	
 	int redis_err = 0;
-	
-	if((redis_err = redisGetReply(conn, &reply)) == REDIS_OK) {
-		getResultFromReply((redisReply *)reply, rlcc);
-		// rlcc->cwnd *= XQC_RLCC_MSS;		// 改成加减动作
-		freeReplyObject(reply);
+	xqc_rlcc_t* rlcc = (xqc_rlcc_t*)arg;
+	void* reply = rlcc->reply;
+	while(1){
+		pthread_mutex_lock(&mutex_lock);
+        pthread_cond_wait(&cond, &mutex_lock);
+		if((redis_err = redisGetReply(rlcc->redis_conn_listener, &reply)) == REDIS_OK) {
+			getResultFromReply((redisReply *)reply, rlcc);
+			freeReplyObject(reply);
+		}
+		pthread_mutex_unlock(&mutex_lock);
 	}
 
-	// /* 两个动作只有一个被设置的时候 */
-	// if(rlcc->cwnd==0 && rlcc->pacing_rate!=0){
-	// 	/* cacu cwnd by pacing_rate */
-	// 	rlcc->cwnd = cwnd_gain * rlcc->throughput * rlcc->min_rtt ;
-	// }
-
-	// if(rlcc->pacing_rate==0 && rlcc->cwnd!=0){
-	// 	/* cacu pacing_rate by cwnd */
-		
-	// }
 }
-
 
 static void
 xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params)
-{
+{	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	memset(rlcc, 0, sizeof(*rlcc));
 
@@ -127,11 +166,14 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->rtt = XQC_RLCC_INF;
 	rlcc->srtt = XQC_RLCC_INF;
 	rlcc->rlcc_lost = 0;
-	rlcc->last_delivered = 0;
-	rlcc->throughput = 0;	/* 带宽的计算要按cubic的来 */
+	rlcc->delivered = 0;
+	rlcc->throughput = 0;
 	rlcc->prior_cwnd = rlcc->cwnd;
 	rlcc->min_rtt = rlcc->rtt;
-	rlcc->recovery_start_time = 0;
+	rlcc->is_slow_start = XQC_FALSE;
+	rlcc->in_recovery = XQC_FALSE;
+
+	rlcc->pacing_rate = 32*XQC_RLCC_MSS; 	// init pacing_rate, ideas from COPA
 
 	if (cc_params.customize_on) {
         rlcc->rlcc_path_flag = cc_params.rlcc_path_flag;	// 客户端指定flag标识流
@@ -149,67 +191,65 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 		freeReplyObject(error);
 	}
 
+	// another thread to get action from redis by cond signal
+	pthread_t tid;
+    pthread_create(&tid, NULL, getActionT, (void*)rlcc);
+    pthread_detach(tid);
+
+	return;
 }
 
 static void
-xqc_rlcc_on_ack(void *cong_ctl, xqc_packet_out_t *po, xqc_usec_t now)
+xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 
-	/*
-	对于统计有用的字段
-	po -> po_largest_ack  	Largest Acknowledged in ACK frame
-	po -> po_sent_time		发送时间
-	po -> po_delivered		发这个包之前已经交付的数据总数
-	po_delivered_time		发这个包之前的上一个ack时间
-	po_first_sent_time		the time of first sent packet during current sample period
-	po_is_app_limited		
-	po_tx_in_flight			飞行数据包
-	po_lost					丢包数： 累加值
-	*/
-
-	// ack time - send time
-	rlcc->rtt = now - po->po_sent_time;
+	// ack time - send time || get data from sampler
+	rlcc->rtt = sampler->rtt;
 	// smooth rtt
-	rlcc->srtt = 7 * rlcc->srtt / 8 + rlcc->rtt / 8;
+	rlcc->srtt = sampler->srtt;
 
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
 
 	// update min rtt
 	if (rlcc->min_rtt == 0 || rlcc->rtt < rlcc->min_rtt) {
         rlcc->min_rtt = rlcc->rtt;
-		rlcc->min_rtt_timestamp = current_time;
-    }	
+		rlcc->min_rtt_timestamp = sampler->now;  // min_rtt_timestamp use sampler now
+    }
 	
-	// probeRTT : probe机制并不好，后续考虑其他方法，这里就简单强制更新以下min_rtt
-	if (rlcc->min_rtt_timestamp + 2000000 < current_time){
+	// probeRTT : simplely force update min_rtt every 2s
+	if (rlcc->min_rtt_timestamp + PROBE_INTERVAL < current_time){
 		rlcc->min_rtt = rlcc->rtt;
 		rlcc->min_rtt_timestamp = current_time;
-	}  // 2s不变则强制更新min_rtt
+	}
 
-	if(rlcc->timestamp + 100000 <= current_time){	// 100000 100ms交互一次
+	if(rlcc->timestamp + SAMPLE_INTERVAL <= current_time){	// 100000 100ms交互一次
+		printf("on 100ms\n");
 		rlcc->timestamp = current_time;
-		// rlcc->lost;   on_lost中统计最近100ms内lost的触发次数
+		// rlcc->lost;   on_lost called times in this interval
 
 		// 100ms内的带宽
-		rlcc->throughput = (po -> po_delivered - rlcc->last_delivered)*10; //100ms = /0.1
-		rlcc->last_delivered = po -> po_delivered;
+		rlcc->throughput = ((sampler->acked - rlcc->last_acked)>0 ? (sampler->acked - rlcc->last_acked) : 0) * ((SAMPLE_INTERVAL/1000000)==0 ? 1000000/SAMPLE_INTERVAL : SAMPLE_INTERVAL/1000000 ) ;
+		rlcc->last_acked = sampler->acked;
+		rlcc->delivered_interval = sampler->delivered - rlcc->delivered;
+		rlcc->delivered = sampler->delivered;
 		rlcc->prior_cwnd = rlcc->cwnd;
-		rlcc->inflight = po->po_tx_in_flight;
-		
+		rlcc->prior_pacing_rate = rlcc->pacing_rate;
+		rlcc->inflight = sampler->bytes_inflight;
+
 		// 100ms内的丢包数
-		rlcc->recent_lost = po->po_lost - rlcc->last_po_lost;
-		rlcc->last_po_lost = po->po_lost;
+		rlcc->lost = sampler->loss - rlcc->last_lost;
+		rlcc->last_lost = sampler->loss;
 
 		if(rlcc->rlcc_path_flag){
 			char value[500] = {0};
-			// sprintf(value, "throughput:%d;rtt:%ld;srtt:%ld;inflight:%ld;rlcclost:%d;recent_lost:%d;is_app_limited:%d",
+			// sprintf(value, "throughput:%d;rtt:%ld;srtt:%ld;inflight:%ld;rlcclost:%d;lost:%d;is_app_limited:%d",
 			// 	rlcc->throughput,
 			// 	rlcc->rtt, 
 			// 	rlcc->srtt, 
 			// 	rlcc->inflight, 
 			// 	rlcc->rlcc_lost,
-			// 	rlcc->recent_lost,
+			// 	rlcc->lost,
 			// 	po->po_is_app_limited);
 			sprintf(value, "%d;%ld;%ld;%ld;%d;%d;%d",
 				rlcc->throughput,
@@ -217,21 +257,22 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_packet_out_t *po, xqc_usec_t now)
 				rlcc->srtt, 
 				rlcc->inflight, 
 				rlcc->rlcc_lost,
-				rlcc->recent_lost,
-				po->po_is_app_limited);
+				rlcc->lost,
+				sampler->is_app_limited);
 			pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag , value);
-			getAction(rlcc->redis_conn_listener, rlcc, rlcc->reply, rlcc->rlcc_path_flag); //sub to get the first pub
-			rlcc->cwnd += XQC_RLCC_MSS; // test if ok
+			// getAction(rlcc->redis_conn_listener, rlcc, rlcc->reply, rlcc->rlcc_path_flag); //sub to get the first pub
+			pthread_mutex_lock(&mutex_lock);
+			// send signal
+			pthread_cond_signal(&cond);
+			pthread_mutex_unlock(&mutex_lock);
+
 		}else{
 			redisReply* error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
 			freeReplyObject(error);
 		}
-	}
-	
-	if (po->po_sent_time > rlcc->recovery_start_time){  // quit recovery
-		rlcc->in_recovery = 0;
-	}
 
+	}
+	return;
 }
 
 static void 
@@ -240,26 +281,19 @@ xqc_rlcc_on_lost(void *cong_ctl, xqc_usec_t lost_sent_time)
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
 	
-	if(rlcc->timestamp + 100000 <= current_time){	
+	if(rlcc->timestamp + SAMPLE_INTERVAL <= current_time){	
 		rlcc->rlcc_lost++;
 	}else{
 		rlcc->rlcc_lost = 0;
 	}
-
-	/* No reaction if already in a recovery period. */
-    if (rlcc->in_recovery) {
-        return;
-    }
-
-	rlcc->recovery_start_time = xqc_monotonic_timestamp();
-	rlcc->in_recovery = 1;
+	return;
 }
 
 static uint64_t 
 xqc_rlcc_get_cwnd(void *cong_ctl)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-    return rlcc->cwnd;
+	return rlcc->cwnd;
 }
 
 static void 
@@ -267,7 +301,7 @@ xqc_rlcc_reset_cwnd(void *cong_ctl)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
     rlcc->cwnd = XQC_RLCC_MIN_WINDOW;
-	rlcc->recovery_start_time = 0;
+	return;
 }
 
 size_t
@@ -280,7 +314,6 @@ static uint32_t
 xqc_rlcc_get_pacing_rate(void *cong_ctl)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-
     return rlcc->pacing_rate;
 }
 
@@ -288,7 +321,7 @@ static uint32_t
 xqc_rlcc_get_bandwidth(void *cong_ctl)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-    return rlcc->throughput;
+	return rlcc->throughput;
 }
 
 static void 
@@ -300,24 +333,26 @@ xqc_rlcc_restart_from_idle(void *cong_ctl, uint64_t conn_delivered)
 static int
 xqc_rlcc_in_recovery(void *cong) {
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong);
-    return rlcc->in_recovery;	// 这块可能有影响，后续需要观察
+    return rlcc->in_recovery;	// never in in recovery, all control by cc RL
 }
 
 int32_t
 xqc_rlcc_in_slow_start(void *cong_ctl)
-{
+{	
     xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-    return 0;	// nerver in slow start
+    return rlcc->is_slow_start;	// nerver in slow start, all control by cc RL
 }
 
 const xqc_cong_ctrl_callback_t xqc_rlcc_cb = {
-    .xqc_cong_ctl_size              = xqc_rlcc_size,
-    .xqc_cong_ctl_init              = xqc_rlcc_init,
-    .xqc_cong_ctl_on_lost           = xqc_rlcc_on_lost,
-    .xqc_cong_ctl_on_ack            = xqc_rlcc_on_ack,
-    .xqc_cong_ctl_get_cwnd          = xqc_rlcc_get_cwnd,
-    .xqc_cong_ctl_reset_cwnd        = xqc_rlcc_reset_cwnd,
-    .xqc_cong_ctl_in_slow_start     = xqc_rlcc_in_slow_start,
-    .xqc_cong_ctl_restart_from_idle = xqc_rlcc_restart_from_idle,
-    .xqc_cong_ctl_in_recovery       = xqc_rlcc_in_recovery,
+    .xqc_cong_ctl_size              	= xqc_rlcc_size,
+    .xqc_cong_ctl_init              	= xqc_rlcc_init,
+    .xqc_cong_ctl_on_lost           	= xqc_rlcc_on_lost,
+	.xqc_cong_ctl_on_ack_multiple_pkts 	= xqc_rlcc_on_ack,	// change pacing rate
+    // .xqc_cong_ctl_on_ack				= xqc_rlcc_on_ack,	// only change cwnd
+    .xqc_cong_ctl_get_cwnd				= xqc_rlcc_get_cwnd,
+    .xqc_cong_ctl_reset_cwnd			= xqc_rlcc_reset_cwnd,
+    .xqc_cong_ctl_in_slow_start			= xqc_rlcc_in_slow_start,
+    .xqc_cong_ctl_restart_from_idle		= xqc_rlcc_restart_from_idle,
+    .xqc_cong_ctl_in_recovery      		= xqc_rlcc_in_recovery,
+	.xqc_cong_ctl_get_pacing_rate		= xqc_rlcc_get_pacing_rate,
 };

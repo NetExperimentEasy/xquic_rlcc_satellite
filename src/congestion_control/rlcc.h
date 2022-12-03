@@ -26,21 +26,24 @@ typedef struct xqc_rlcc_s {
     /* sample state */
     xqc_usec_t              timestamp;
     xqc_usec_t              rtt;
-    uint32_t                rlcc_lost;       // rlcc on_lost方法最近100ms的调用次数
-    uint64_t                last_po_lost;   // 上次的po_lost
-    uint32_t                recent_lost;    // 根据po_lost计算的最近100ms的丢包数
+    uint32_t                rlcc_lost;   // on loss times
+    uint64_t                last_lost;
+    uint32_t                lost;       // sampler lost
     xqc_usec_t              srtt;
     uint32_t                throughput;
-    uint32_t                last_delivered;
+    uint32_t                delivered;
+    uint32_t                delivered_interval;
+    uint32_t                last_acked;
     uint64_t                inflight;
     uint32_t                prior_cwnd;
+    uint32_t                prior_pacing_rate;
     xqc_usec_t              min_rtt;
     xqc_usec_t              min_rtt_timestamp;
 
-    uint32_t                in_recovery;
+    xqc_bool_t              in_recovery;
+    xqc_bool_t              is_slow_start;
 
     uint32_t                rlcc_path_flag;
-    xqc_usec_t              recovery_start_time;
 } xqc_rlcc_t;
 
 extern const xqc_cong_ctrl_callback_t xqc_rlcc_cb;
