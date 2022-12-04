@@ -204,12 +204,12 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 *  prior_inflight : uint32_t : 处理此ack前的inflight
 	 *  rtt : xqc_usec_t : 采样区间测得的rtt
 	 *  is_app_limited : uint32_t : 
-	 *  loss : uint32_t : 是否有丢包？
+	 *  loss : uint32_t : 目测是周期内的丢包数
 	 *  total_acked : uint64_t : 总acked数
 	 *  srtt : xqc_usec_t
 	 *  delivery_rate : uint32_t : (uint64_t)(1e6 * sampler->delivered / sampler->interval);
-	 *  prior_lost : uint32_t : bbr2 此次采样前的丢包数？
-	 *  lost_pkts : uint32 : 此周期的丢包数？ 
+	 *  prior_lost : uint32_t : bbr2用于判断丢包是否过快  这两个丢包数很诡异，不可用
+	 *  lost_pkts : uint32 : bbr2用于判断丢包是否过快  这两个丢包数很诡异，不可用
 	 */
 
 	 /*

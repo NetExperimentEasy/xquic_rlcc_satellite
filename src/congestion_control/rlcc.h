@@ -14,9 +14,9 @@
 #define MSEC2SEC 1000000
 
 typedef struct xqc_rlcc_s {
-    uint32_t                cwnd;
+    uint64_t                cwnd;
     /* Current pacing rate */
-    uint32_t                pacing_rate;
+    uint64_t                pacing_rate;
     redisContext*           redis_conn_listener;
     redisContext*           redis_conn_publisher;
     void*                   reply; // subscribe
