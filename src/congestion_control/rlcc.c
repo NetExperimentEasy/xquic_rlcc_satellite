@@ -213,9 +213,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 */
 
 	 /*
-	 起步的rtt较大，前期rtt基本很小，但是导致srtt计算结果一直很大迟迟不能降下来，srtt变化慢 但是能反应相对稳定的反应变化趋势（必须结合rtt的变化才准确）
-	 TODO：没有测到丢包信息
-	 在mininet场景，有损链路测试
+	 *起步的rtt较大，前期rtt基本很小，但是导致srtt计算结果前200ms一直很大迟迟不能降下来，srtt变化慢 但是能反应相对稳定的反应变化趋势（必须结合rtt的变化才准确）
 	 */
 
 	printf("debug:pd:%ld, i:%ld, d:%d, a:%d, bi:%d, pi:%d, r:%ld, ial:%d, l:%d, ta:%ld, s:%ld, dr:%d, pl:%d, lp:%d\n",
