@@ -38,8 +38,6 @@ xqc_rlcc_cac_pacing_rate_by_cwnd(xqc_rlcc_t *rlcc)
 static void 
 xqc_rlcc_cac_cwnd_by_pacing_rate(xqc_rlcc_t *rlcc)
 {	
-	// pacing rate 计算有问题
-	printf("cacu : before cwnd %d, pacing_rate : %d, srtt : %ld, MSE : %d\n", rlcc->cwnd, rlcc->pacing_rate, rlcc->srtt, MSEC2SEC);
     rlcc->cwnd = CWND_GAIN * rlcc->pacing_rate * (rlcc->srtt ? rlcc->srtt : 1000) / (uint64_t)MSEC2SEC;
 	rlcc->cwnd = xqc_max(rlcc->cwnd, XQC_RLCC_MIN_WINDOW);
 	return;
@@ -83,14 +81,11 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 	float cwnd_rate;
 	float pacing_rate_rate;
 	if(reply->type == REDIS_REPLY_ARRAY) {
-		// printf("%s\n", reply->element[2]->str);
 
 		printf("before cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
 
 		// cwnd_rate : (0, +INF), pacing_rate_rate : (0, +INF); if value is 0, means that set it auto
 		sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
-		
-		// printf("%f, %d ; %f, %d\n", cwnd_rate, (cwnd_rate!=0), pacing_rate_rate, (pacing_rate_rate!=0));
 
 		if(cwnd_rate!=0){
 			rlcc->cwnd *= cwnd_rate;
@@ -123,9 +118,6 @@ subscribe(redisContext* conn, xqc_rlcc_t* rlcc)
 {
 	rlcc->reply = NULL;
     int redis_err = 0;
-
-	// char key[10] = {0};
-    // sprintf(key, "%d", rlcc->rlcc_path_flag);
 
 	if ((rlcc->reply = redisCommand(conn, "SUBSCRIBE rlccaction_%d", rlcc->rlcc_path_flag)) == NULL) {
         printf("Failed to Subscibe)\n");
@@ -203,6 +195,45 @@ static void
 xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+
+	/*	prior_delivered : uint64_t : 当前确认包发送前的交付数
+	 *	interval : xqc_usec_t : 两次采样的间隔时间
+	 *  delivered : uint32_t : 此次采样区间内的交付数
+	 *  acked : uint32_t : 最新一次被ack的数据的大小
+	 *  bytes_inflight : uint32_t : 发送未收到确认的数据量
+	 *  prior_inflight : uint32_t : 处理此ack前的inflight
+	 *  rtt : xqc_usec_t : 采样区间测得的rtt
+	 *  is_app_limited : uint32_t : 
+	 *  loss : uint32_t : 是否有丢包？
+	 *  total_acked : uint64_t : 总acked数
+	 *  srtt : xqc_usec_t
+	 *  delivery_rate : uint32_t : (uint64_t)(1e6 * sampler->delivered / sampler->interval);
+	 *  prior_lost : uint32_t : bbr2 此次采样前的丢包数？
+	 *  lost_pkts : uint32 : 此周期的丢包数？ 
+	 */
+
+	 /*
+	 起步的rtt较大，前期rtt基本很小，但是导致srtt计算结果一直很大迟迟不能降下来，srtt变化慢 但是能反应相对稳定的反应变化趋势（必须结合rtt的变化才准确）
+	 TODO：没有测到丢包信息
+	 在mininet场景，有损链路测试
+	 */
+
+	printf("debug:pd:%ld, i:%ld, d:%d, a:%d, bi:%d, pi:%d, r:%ld, ial:%d, l:%d, ta:%ld, s:%ld, dr:%d, pl:%d, lp:%d\n",
+		sampler->prior_delivered,
+		sampler->interval,
+		sampler->delivered,
+		sampler->acked,
+		sampler->bytes_inflight,
+		sampler->prior_inflight,
+		sampler->rtt,
+		sampler->is_app_limited,
+		sampler->loss,
+		sampler->total_acked,
+		sampler->srtt,
+		sampler->delivery_rate,
+		sampler->prior_lost,
+		sampler->lost_pkts
+	);
 
 	// ack time - send time || get data from sampler
 	rlcc->rtt = sampler->rtt;
@@ -347,7 +378,7 @@ const xqc_cong_ctrl_callback_t xqc_rlcc_cb = {
     .xqc_cong_ctl_size              	= xqc_rlcc_size,
     .xqc_cong_ctl_init              	= xqc_rlcc_init,
     .xqc_cong_ctl_on_lost           	= xqc_rlcc_on_lost,
-	.xqc_cong_ctl_on_ack_multiple_pkts 	= xqc_rlcc_on_ack,	// change pacing rate
+	.xqc_cong_ctl_on_ack_multiple_pkts 	= xqc_rlcc_on_ack,	// bind with change pacing rate
     // .xqc_cong_ctl_on_ack				= xqc_rlcc_on_ack,	// only change cwnd
     .xqc_cong_ctl_get_cwnd				= xqc_rlcc_get_cwnd,
     .xqc_cong_ctl_reset_cwnd			= xqc_rlcc_reset_cwnd,
