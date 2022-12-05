@@ -82,7 +82,7 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 	float pacing_rate_rate;
 	if(reply->type == REDIS_REPLY_ARRAY) {
 
-		printf("before cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
+		printf("before cwnd is %ld, pacing_rate is %ld\n", rlcc->cwnd, rlcc->pacing_rate);
 
 		// cwnd_rate : (0, +INF), pacing_rate_rate : (0, +INF); if value is 0, means that set it auto
 		sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
@@ -107,7 +107,7 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 			xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
 		}
 
-		printf("after cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
+		printf("after cwnd is %ld, pacing_rate is %ld\n", rlcc->cwnd, rlcc->pacing_rate);
 	}
 
 	return;
@@ -213,8 +213,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 */
 
 	 /*
-	 *起步的rtt较大，前期rtt基本很小，但是导致srtt计算结果前200ms一直很大迟迟不能降下来，srtt变化慢 但是能反应相对稳定的反应变化趋势（必须结合rtt的变化才准确）
-	 */
+	  *起步的rtt较大，前期rtt基本很小，但是导致srtt计算结果前200ms一直很大迟迟不能降下来，srtt变化慢 但是能反应相对稳定的反应变化趋势（必须结合rtt的变化才准确）
+	  */
 
 	printf("debug:pd:%ld, i:%ld, d:%d, a:%d, bi:%d, pi:%d, r:%ld, ial:%d, l:%d, ta:%ld, s:%ld, dr:%d, pl:%d, lp:%d\n",
 		sampler->prior_delivered,
