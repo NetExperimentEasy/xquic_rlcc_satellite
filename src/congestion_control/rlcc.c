@@ -196,9 +196,9 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 
-	/*	prior_delivered : uint64_t : 当前确认包发送前的交付数
-	 *	interval : xqc_usec_t : 两次采样的间隔时间
-	 *  delivered : uint32_t : 此次采样区间内的交付数
+	/*	prior_delivered : uint64_t : 当前确认包发送前的交付数, 存疑
+	 *	interval : xqc_usec_t : 两次采样的间隔时间，稍大于约1rtt的时间
+	 *  delivered : uint32_t : 采样区间内的交付数
 	 *  acked : uint32_t : 最新一次被ack的数据的大小
 	 *  bytes_inflight : uint32_t : 发送未收到确认的数据量
 	 *  prior_inflight : uint32_t : 处理此ack前的inflight
