@@ -25,15 +25,13 @@ typedef struct xqc_rlcc_s {
 
     /* sample state */
     xqc_usec_t              timestamp;
+    xqc_usec_t              sample_start;   // 双rtt采样法的采样起止时间，更新timestamp时，更新这两个时间
+    xqc_usec_t              sample_stop;
     xqc_usec_t              rtt;
-    uint32_t                rlcc_lost;   // on loss times
-    uint64_t                last_lost;
-    uint32_t                lost;       // sampler lost
     xqc_usec_t              srtt;
-    uint32_t                throughput;
-    uint32_t                delivered;
-    uint32_t                delivered_interval;
-    uint32_t                last_acked;
+    uint32_t                rlcc_lost;   // on loss times
+    uint32_t                lost;       // sampler lost
+    uint32_t                delivery_rate;
     uint64_t                inflight;
     uint32_t                prior_cwnd;
     uint32_t                prior_pacing_rate;

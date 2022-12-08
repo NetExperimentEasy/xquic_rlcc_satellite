@@ -158,14 +158,14 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->rtt = XQC_RLCC_INF;
 	rlcc->srtt = XQC_RLCC_INF;
 	rlcc->rlcc_lost = 0;
-	rlcc->delivered = 0;
-	rlcc->throughput = 0;
+	rlcc->delivery_rate = 0;
 	rlcc->prior_cwnd = rlcc->cwnd;
 	rlcc->min_rtt = rlcc->rtt;
 	rlcc->is_slow_start = XQC_FALSE;
 	rlcc->in_recovery = XQC_FALSE;
 
-	rlcc->pacing_rate = 32*XQC_RLCC_MSS; 	// init pacing_rate, ideas from COPA
+	xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
+	rlcc->prior_pacing_rate = rlcc->pacing_rate;
 
 	if (cc_params.customize_on) {
         rlcc->rlcc_path_flag = cc_params.rlcc_path_flag;	// 客户端指定flag标识流
@@ -196,7 +196,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 
-	/*	prior_delivered : uint64_t : 当前确认包发送前的交付数, 存疑
+	/*	sampler
+	 *  prior_delivered : uint64_t : 当前确认的数据包发送前的交付数, 存疑
 	 *	interval : xqc_usec_t : 两次采样的间隔时间，稍大于约1rtt的时间
 	 *  delivered : uint32_t : 采样区间内的交付数
 	 *  acked : uint32_t : 最新一次被ack的数据的大小
@@ -208,8 +209,9 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 *  total_acked : uint64_t : 总acked数
 	 *  srtt : xqc_usec_t
 	 *  delivery_rate : uint32_t : (uint64_t)(1e6 * sampler->delivered / sampler->interval);
-	 *  prior_lost : uint32_t : bbr2用于判断丢包是否过快  这两个丢包数很诡异，不可用
-	 *  lost_pkts : uint32 : bbr2用于判断丢包是否过快  这两个丢包数很诡异，不可用
+	 *  prior_lost : uint32_t : bbr2用于判断丢包是否过快, 此包发送前的丢包数  但是这个丢包数很诡异，应该是减去了已经重传的包
+	 *  tx_in_flight ： 此包发送时的inflight（包括此包）
+	 *  lost_pkts : uint32 : bbr2用于判断丢包是否过快，目前为止的丢包总数-此包发送前的丢包数
 	 */
 
 	 /*
@@ -233,16 +235,11 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 		sampler->lost_pkts
 	);
 
-	// ack time - send time || get data from sampler
-	rlcc->rtt = sampler->rtt;
-	// smooth rtt
-	rlcc->srtt = sampler->srtt;
-
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
 
 	// update min rtt
-	if (rlcc->min_rtt == 0 || rlcc->rtt < rlcc->min_rtt) {
-        rlcc->min_rtt = rlcc->rtt;
+	if (rlcc->min_rtt == 0 || sampler->rtt < rlcc->min_rtt) {
+        rlcc->min_rtt = sampler->rtt;
 		rlcc->min_rtt_timestamp = sampler->now;  // min_rtt_timestamp use sampler now
     }
 	
@@ -252,44 +249,40 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 		rlcc->min_rtt_timestamp = current_time;
 	}
 
+	int plan = 1;
+
+	if (plan == 1)
+	{
+	// plan1. 100ms固定间隔单步状态(取最近一次ack的sampler结果)
 	if(rlcc->timestamp + SAMPLE_INTERVAL <= current_time){	// 100000 100ms交互一次
-		printf("on 100ms\n");
-		rlcc->timestamp = current_time;
-		// rlcc->lost;   on_lost called times in this interval
-
-		// 100ms内的带宽
-		rlcc->throughput = ((sampler->acked - rlcc->last_acked)>0 ? (sampler->acked - rlcc->last_acked) : 0) * ((SAMPLE_INTERVAL/1000000)==0 ? 1000000/SAMPLE_INTERVAL : SAMPLE_INTERVAL/1000000 ) ;
-		rlcc->last_acked = sampler->acked;
-		rlcc->delivered_interval = sampler->delivered - rlcc->delivered;
-		rlcc->delivered = sampler->delivered;
-		rlcc->prior_cwnd = rlcc->cwnd;
-		rlcc->prior_pacing_rate = rlcc->pacing_rate;
-		rlcc->inflight = sampler->bytes_inflight;
-
-		// 100ms内的丢包数
-		rlcc->lost = sampler->loss - rlcc->last_lost;
-		rlcc->last_lost = sampler->loss;
+		
+		rlcc->timestamp = current_time; // 更新时间戳
 
 		if(rlcc->rlcc_path_flag){
 			char value[500] = {0};
-			// sprintf(value, "throughput:%d;rtt:%ld;srtt:%ld;inflight:%ld;rlcclost:%d;lost:%d;is_app_limited:%d",
-			// 	rlcc->throughput,
-			// 	rlcc->rtt, 
-			// 	rlcc->srtt, 
-			// 	rlcc->inflight, 
-			// 	rlcc->rlcc_lost,
-			// 	rlcc->lost,
-			// 	po->po_is_app_limited);
-			sprintf(value, "%d;%ld;%ld;%ld;%d;%d;%d",
-				rlcc->throughput,
-				rlcc->rtt, 
-				rlcc->srtt, 
-				rlcc->inflight, 
+			// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d",
+			// rlcc->cwnd,
+			// rlcc->pacing_rate,
+			// sampler->rtt,
+			// rlcc->min_rtt,
+			// sampler->srtt, 
+			// sampler->bytes_inflight, 
+			// rlcc->rlcc_lost,
+			// sampler->lost_pkts,
+			// sampler->is_app_limited,
+			// sampler->delivery_rate);
+			sprintf(value, "%ld;%ld;%ld;%ld;%ld;%d;%d;%d;%d;%d",
+				rlcc->cwnd,
+				rlcc->pacing_rate,
+				sampler->rtt,
+				rlcc->min_rtt,
+				sampler->srtt,
+				sampler->bytes_inflight, 
 				rlcc->rlcc_lost,
-				rlcc->lost,
-				sampler->is_app_limited);
+				sampler->lost_pkts,
+				sampler->is_app_limited,
+				sampler->delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
 			pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag , value);
-			// getAction(rlcc->redis_conn_listener, rlcc, rlcc->reply, rlcc->rlcc_path_flag); //sub to get the first pub
 			pthread_mutex_lock(&mutex_lock);
 			// send signal
 			pthread_cond_signal(&cond);
@@ -301,6 +294,86 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 		}
 
 	}
+	}
+
+	if (plan == 2)
+	{
+	// plan2. 双rtt 半rtt状态
+	// xqc_usec_t time_interval;
+
+	if (rlcc->sample_start > current_time){
+		// 开始采样前持续更新到最新的sampler
+		rlcc->rtt = sampler->rtt;
+		rlcc->srtt = sampler->srtt;
+		rlcc->inflight = sampler->bytes_inflight;
+		rlcc->lost = sampler->lost_pkts;
+		rlcc->delivery_rate = sampler->delivery_rate;
+	}
+
+	if (rlcc->sample_start <= current_time){
+		// sample
+		rlcc->rtt -= rlcc->rtt >> 2;
+		rlcc->rtt += sampler->rtt >> 2;
+
+		rlcc->srtt -= rlcc->srtt >> 2;
+		rlcc->srtt += sampler->srtt >> 2;
+
+		rlcc->inflight -= rlcc->inflight >> 2;
+		rlcc->inflight += sampler->bytes_inflight >> 2;
+
+		printf("rlcc lost %d, >>2 %d",rlcc->lost, rlcc->lost >> 2);
+		rlcc->lost -= rlcc->lost >> 2;				// 验证下 这里 0 右移会不会溢出
+		rlcc->lost += sampler->lost_pkts >> 2;
+		printf("rlcc_lost after %d", rlcc->lost);
+
+		rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
+		rlcc->delivery_rate += sampler->delivery_rate >> 2;
+
+	}
+
+	if (rlcc->sample_stop<current_time){
+		// stop sample and send signal
+
+		rlcc->timestamp = current_time;
+		rlcc->sample_start = current_time + sampler->srtt;
+		rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
+	
+		if(rlcc->rlcc_path_flag){
+			char value[500] = {0};
+			// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d",
+			// rlcc->cwnd,
+			// rlcc->pacing_rate,
+			// sampler->rtt,
+			// rlcc->min_rtt,
+			// sampler->srtt, 
+			// sampler->bytes_inflight, 
+			// rlcc->rlcc_lost,
+			// sampler->lost_pkts,
+			// sampler->is_app_limited,
+			// sampler->delivery_rate);
+			sprintf(value, "%ld;%ld;%ld;%ld;%ld;%ld;%d;%d;%d;%d",
+				rlcc->cwnd,
+				rlcc->pacing_rate,
+				rlcc->rtt,
+				rlcc->min_rtt,
+				rlcc->srtt,
+				rlcc->inflight, 
+				rlcc->rlcc_lost,
+				rlcc->lost,
+				sampler->is_app_limited,
+				rlcc->delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
+			pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag , value);
+			pthread_mutex_lock(&mutex_lock);
+			// send signal
+			pthread_cond_signal(&cond);
+			pthread_mutex_unlock(&mutex_lock);
+
+		}else{
+			redisReply* error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
+			freeReplyObject(error);
+		}
+	}
+	}
 	return;
 }
 
@@ -310,11 +383,30 @@ xqc_rlcc_on_lost(void *cong_ctl, xqc_usec_t lost_sent_time)
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
 	
+	int plan = 1;
+
+	if (plan == 1)
+	{
+	// plan1. 100ms固定间隔单步状态
 	if(rlcc->timestamp + SAMPLE_INTERVAL <= current_time){	
 		rlcc->rlcc_lost++;
 	}else{
 		rlcc->rlcc_lost = 0;
 	}
+	}
+
+	if (plan == 2)
+	{
+	// plan2. 双rtt 统计最近间隔内的丢包情况状态
+	if (rlcc->sample_start <= current_time){
+		rlcc->rlcc_lost++;
+	}
+
+	if (rlcc->sample_stop < current_time){
+		rlcc->rlcc_lost = 0;
+	}
+	}
+
 	return;
 }
 
@@ -350,7 +442,7 @@ static uint32_t
 xqc_rlcc_get_bandwidth(void *cong_ctl)
 {	
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-	return rlcc->throughput;
+	return rlcc->delivery_rate;
 }
 
 static void 
