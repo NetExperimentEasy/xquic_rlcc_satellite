@@ -14,9 +14,9 @@
 #define MSEC2SEC 1000000
 
 typedef struct xqc_rlcc_s {
-    uint64_t                cwnd;
+    uint32_t                cwnd;
     /* Current pacing rate */
-    uint64_t                pacing_rate;
+    uint32_t                pacing_rate;
     redisContext*           redis_conn_listener;
     redisContext*           redis_conn_publisher;
     void*                   reply; // subscribe
@@ -32,7 +32,8 @@ typedef struct xqc_rlcc_s {
     uint32_t                rlcc_lost;   // on loss times
     uint32_t                lost;       // sampler lost
     uint32_t                delivery_rate;
-    uint64_t                inflight;
+    uint32_t                soft_delivery_rate;
+    uint32_t                inflight;
     uint32_t                prior_cwnd;
     uint32_t                prior_pacing_rate;
     xqc_usec_t              min_rtt;

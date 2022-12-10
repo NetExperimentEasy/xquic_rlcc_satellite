@@ -22,6 +22,7 @@
 #define PROBE_INTERVAL				2000000		// 2s
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
+const uint32_t max_xqc = 2147483647;
 
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -29,17 +30,18 @@ static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
 static void 
 xqc_rlcc_cac_pacing_rate_by_cwnd(xqc_rlcc_t *rlcc)
 {	
-    rlcc->pacing_rate = rlcc->cwnd * (uint64_t)MSEC2SEC
-        / (rlcc->srtt ? rlcc->srtt : 1000);
-	rlcc->pacing_rate = xqc_max(rlcc->pacing_rate, XQC_RLCC_MSS);
+    rlcc->pacing_rate = (rlcc->cwnd / (rlcc->srtt ? rlcc->srtt : 1000)) * (uint64_t)MSEC2SEC;
+	// rlcc->pacing_rate = xqc_max(rlcc->pacing_rate, XQC_RLCC_MSS);
+	rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_RLCC_MSS, max_xqc);
 	return;
 }
 
 static void 
 xqc_rlcc_cac_cwnd_by_pacing_rate(xqc_rlcc_t *rlcc)
 {	
-    rlcc->cwnd = CWND_GAIN * rlcc->pacing_rate * (rlcc->srtt ? rlcc->srtt : 1000) / (uint64_t)MSEC2SEC;
-	rlcc->cwnd = xqc_max(rlcc->cwnd, XQC_RLCC_MIN_WINDOW);
+    rlcc->cwnd = CWND_GAIN * (rlcc->pacing_rate/(uint64_t)MSEC2SEC) * (rlcc->srtt ? rlcc->srtt : 1000);
+	// rlcc->cwnd = xqc_max(rlcc->cwnd, XQC_RLCC_MIN_WINDOW);
+	rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, max_xqc);
 	return;
 }
 
@@ -82,7 +84,7 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 	float pacing_rate_rate;
 	if(reply->type == REDIS_REPLY_ARRAY) {
 
-		printf("before cwnd is %ld, pacing_rate is %ld\n", rlcc->cwnd, rlcc->pacing_rate);
+		// printf("before cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
 
 		// cwnd_rate : (0, +INF), pacing_rate_rate : (0, +INF); if value is 0, means that set it auto
 		sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
@@ -107,7 +109,7 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t* rlcc)
 			xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
 		}
 
-		printf("after cwnd is %ld, pacing_rate is %ld\n", rlcc->cwnd, rlcc->pacing_rate);
+		// printf("after cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
 	}
 
 	return;
@@ -159,6 +161,7 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->srtt = XQC_RLCC_INF;
 	rlcc->rlcc_lost = 0;
 	rlcc->delivery_rate = 0;
+	rlcc->soft_delivery_rate = 0;
 	rlcc->prior_cwnd = rlcc->cwnd;
 	rlcc->min_rtt = rlcc->rtt;
 	rlcc->is_slow_start = XQC_FALSE;
@@ -249,6 +252,13 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 		rlcc->min_rtt_timestamp = current_time;
 	}
 
+	if(rlcc->soft_delivery_rate == 0){
+		rlcc->soft_delivery_rate=sampler->delivery_rate;
+	}else{
+		rlcc->soft_delivery_rate -= rlcc->soft_delivery_rate >> 3;
+		rlcc->soft_delivery_rate += sampler->delivery_rate >> 3;
+	}
+
 	int plan = 1;
 
 	if (plan == 1)
@@ -260,7 +270,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 		if(rlcc->rlcc_path_flag){
 			char value[500] = {0};
-			// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d",
+			// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;soft_delivery_rate:%d",
 			// rlcc->cwnd,
 			// rlcc->pacing_rate,
 			// sampler->rtt,
@@ -270,10 +280,11 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			// rlcc->rlcc_lost,
 			// sampler->lost_pkts,
 			// sampler->is_app_limited,
-			// sampler->delivery_rate);
-			sprintf(value, "%ld;%ld;%ld;%ld;%ld;%d;%d;%d;%d;%d",
-				rlcc->cwnd,
-				rlcc->pacing_rate,
+			// sampler->delivery_rate,
+			// rlcc->soft_delivery_rate);
+			sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d",
+				(rlcc->cwnd>>10),
+				(rlcc->pacing_rate>>10),
 				sampler->rtt,
 				rlcc->min_rtt,
 				sampler->srtt,
@@ -281,7 +292,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 				rlcc->rlcc_lost,
 				sampler->lost_pkts,
 				sampler->is_app_limited,
-				sampler->delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
+				sampler->delivery_rate,
+				rlcc->soft_delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
 			pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag , value);
 			pthread_mutex_lock(&mutex_lock);
 			// send signal
@@ -340,7 +352,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	
 		if(rlcc->rlcc_path_flag){
 			char value[500] = {0};
-			// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d",
+			// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;soft_delivery_rate:%d",
 			// rlcc->cwnd,
 			// rlcc->pacing_rate,
 			// sampler->rtt,
@@ -350,10 +362,11 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			// rlcc->rlcc_lost,
 			// sampler->lost_pkts,
 			// sampler->is_app_limited,
-			// sampler->delivery_rate);
-			sprintf(value, "%ld;%ld;%ld;%ld;%ld;%ld;%d;%d;%d;%d",
-				rlcc->cwnd,
-				rlcc->pacing_rate,
+			// sampler->delivery_rate
+			// rlcc->soft_delivery_rate);
+			sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d",
+				(rlcc->cwnd>>10),
+				(rlcc->pacing_rate>>10),
 				rlcc->rtt,
 				rlcc->min_rtt,
 				rlcc->srtt,
@@ -361,7 +374,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 				rlcc->rlcc_lost,
 				rlcc->lost,
 				sampler->is_app_limited,
-				rlcc->delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
+				rlcc->delivery_rate,
+				rlcc->soft_delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
 			pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag , value);
 			pthread_mutex_lock(&mutex_lock);
 			// send signal
