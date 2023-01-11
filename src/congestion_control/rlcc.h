@@ -42,7 +42,15 @@ typedef struct xqc_rlcc_s {
     xqc_bool_t              in_recovery;
     xqc_bool_t              is_slow_start;
 
+    // rlcc_flag : for mininet env
     uint32_t                rlcc_path_flag;
+
+    // satcc action space
+    uint32_t                cwnd_int;
+    uint8_t                 up_times;
+    uint8_t                 down_times;
+    uint8_t                 up_n;
+
 } xqc_rlcc_t;
 
 extern const xqc_cong_ctrl_callback_t xqc_rlcc_cb;
