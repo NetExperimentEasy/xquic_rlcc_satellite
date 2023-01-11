@@ -279,14 +279,16 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->timestamp = xqc_monotonic_timestamp();
 	rlcc->rtt = XQC_RLCC_INF;
 	rlcc->srtt = XQC_RLCC_INF;
-	rlcc->rlcc_lost = 0;
+	rlcc->lost_interval = 0;
+	rlcc->lost = 0;
+	rlcc->before_lost = 0;
 	rlcc->delivery_rate = 0;
 	rlcc->prior_cwnd = rlcc->cwnd;
 	rlcc->min_rtt = rlcc->rtt;
 	rlcc->is_slow_start = XQC_FALSE;
 	rlcc->in_recovery = XQC_FALSE;
 	rlcc->throughput = 0;
-	rlcc->sended_timestamp = rlcc->timestamp;
+	rlcc->sended_timestamp = xqc_monotonic_timestamp();
 	rlcc->before_total_sended = 0;
 
 	// for satcc action
@@ -340,36 +342,34 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 *  prior_inflight : uint32_t : 处理此ack前的inflight
 	 *  rtt : xqc_usec_t : 采样区间测得的rtt
 	 *  is_app_limited : uint32_t :
-	 *  loss : uint32_t : 周期内的丢包数
+	 *  loss : uint32_t : whether packet loss //这个lost可以反映丢包，但是不准确，不适合计算
 	 *  total_acked : uint64_t : 总acked数
 	 *  srtt : xqc_usec_t
 	 *  delivery_rate : uint32_t : (uint64_t)(1e6 * sampler->delivered / sampler->interval);
 	 *  prior_lost : uint32_t : bbr2用于判断丢包是否过快, 此包发送前的丢包数  但是这个丢包数很诡异，应该是减去了已经重传的包
 	 *  tx_in_flight ： 此包发送时的inflight（包括此包）
 	 *  lost_pkts : uint32 : bbr2用于判断丢包是否过快，目前为止的丢包总数-此包发送前的丢包数
+	 *     一种计算采样周期丢包率的方法：
+	 * 			记录lost_pkts差（lost_interval），除以此周期的发包数
 	 * 
-	 *  total_sended : 自己增加的字段：每次on_sent的时候，total_sended = ctl->ctl_bytes_send += packet_out->po_used_size;
+	 *  total_sended  ctl->ctl_bytes_send 
 	 */
 
-	/*
-	 *起步的rtt较大，前期rtt基本很小，但是导致srtt计算结果前200ms一直很大迟迟不能降下来，srtt变化慢 但是能反应相对稳定的反应变化趋势（必须结合rtt的变化才准确）
-	 */
-
-	printf("debug:pd:%ld, i:%ld, d:%d, a:%d, bi:%d, pi:%d, r:%ld, ial:%d, l:%d, ta:%ld, s:%ld, dr:%d, pl:%d, lp:%d\n",
-		   sampler->prior_delivered,
-		   sampler->interval,
-		   sampler->delivered,
-		   sampler->acked,
-		   sampler->bytes_inflight,
-		   sampler->prior_inflight,
-		   sampler->rtt,
-		   sampler->is_app_limited,
-		   sampler->loss,
-		   sampler->total_acked,
-		   sampler->srtt,
-		   sampler->delivery_rate,
-		   sampler->prior_lost,
-		   sampler->lost_pkts);
+	// printf("debug:pd:%ld, i:%ld, d:%d, a:%d, bi:%d, pi:%d, r:%ld, ial:%d, l:%d, ta:%ld, s:%ld, dr:%d, pl:%d, lp:%d\n",
+	// 	   sampler->prior_delivered,
+	// 	   sampler->interval,
+	// 	   sampler->delivered,
+	// 	   sampler->acked,
+	// 	   sampler->bytes_inflight,
+	// 	   sampler->prior_inflight,
+	// 	   sampler->rtt,
+	// 	   sampler->is_app_limited,
+	// 	   sampler->loss,
+	// 	   sampler->total_acked,
+	// 	   sampler->srtt,
+	// 	   sampler->delivery_rate,
+	// 	   sampler->prior_lost,
+	// 	   sampler->lost_pkts);
 
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
 
@@ -404,22 +404,26 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 		{ // 100000 100ms交互一次
 
 			rlcc->timestamp = current_time; // 更新时间戳
-			uint32_t sended_interval = sampler->total_sended - rlcc->before_total_sended;
+			uint32_t sended_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sended;
 			rlcc->throughput = 1e6 * sended_interval / (current_time - rlcc->sended_timestamp);
 			rlcc->sended_timestamp = current_time;
-			rlcc->before_total_sended = sampler->total_sended;
+			rlcc->before_total_sended = sampler->send_ctl->ctl_bytes_send;
+			
+			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
+			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
+			rlcc->before_lost = sampler->lost_pkts;
 
 			if (rlcc->rlcc_path_flag)
 			{
 				char value[500] = {0};
-				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d;sended_interval:%d",
+				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;lost_interval:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d;sended_interval:%d",
 				// rlcc->cwnd,
 				// rlcc->pacing_rate,
 				// sampler->rtt,
 				// rlcc->min_rtt,
 				// sampler->srtt,
 				// sampler->bytes_inflight,
-				// rlcc->rlcc_lost,
+				// rlcc->lost_interval,
 				// sampler->lost_pkts,
 				// sampler->is_app_limited,
 				// sampler->delivery_rate,
@@ -432,7 +436,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						rlcc->min_rtt,
 						sampler->srtt,
 						sampler->bytes_inflight,
-						rlcc->rlcc_lost,
+						rlcc->lost_interval,
 						sampler->lost_pkts,
 						sampler->is_app_limited,
 						sampler->delivery_rate,
@@ -465,8 +469,11 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->inflight = sampler->bytes_inflight;
 			rlcc->lost = sampler->lost_pkts;
 			rlcc->delivery_rate = sampler->delivery_rate;
-			rlcc->before_total_sended = sampler->total_sended;
+			
+			rlcc->before_total_sended = sampler->send_ctl->ctl_bytes_send;
 			rlcc->sended_timestamp = current_time;
+
+			rlcc->before_lost = sampler->lost_pkts;
 		}
 
 		if (rlcc->sample_start <= current_time)
@@ -481,10 +488,10 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->inflight -= rlcc->inflight >> 2;
 			rlcc->inflight += sampler->bytes_inflight >> 2;
 
-			printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
-			rlcc->lost -= rlcc->lost >> 2; // 验证下 这里 0 右移会不会溢出
+			// printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
+			rlcc->lost -= rlcc->lost >> 2;
 			rlcc->lost += sampler->lost_pkts >> 2;
-			printf("rlcc_lost after %d", rlcc->lost);
+			// printf("rlcc lost after %d", rlcc->lost);
 
 			rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
 			rlcc->delivery_rate += sampler->delivery_rate >> 2;
@@ -498,20 +505,23 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->sample_start = current_time + rlcc->min_rtt;
 			rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
 			
-			uint32_t sended_interval = sampler->total_sended - rlcc->before_total_sended;
+			uint32_t sended_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sended;
 			rlcc->throughput = 1e6 * sended_interval / (current_time - rlcc->sended_timestamp);
+			
+			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
+			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 
 			if (rlcc->rlcc_path_flag)
 			{
 				char value[500] = {0};
-				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d;sended_interval:%d",
+				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;lost_interval:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d;sended_interval:%d",
 				// rlcc->cwnd,
 				// rlcc->pacing_rate,
 				// sampler->rtt,
 				// rlcc->min_rtt,
 				// sampler->srtt,
 				// sampler->bytes_inflight,
-				// rlcc->rlcc_lost,
+				// rlcc->lost_interval,
 				// sampler->lost_pkts,
 				// sampler->is_app_limited,
 				// sampler->delivery_rate,
@@ -524,7 +534,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						rlcc->min_rtt,
 						rlcc->srtt,
 						rlcc->inflight,
-						rlcc->rlcc_lost,
+						rlcc->lost_interval,
 						rlcc->lost,
 						sampler->is_app_limited,
 						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
@@ -551,35 +561,6 @@ xqc_rlcc_on_lost(void *cong_ctl, xqc_usec_t lost_sent_time)
 {
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
-
-	int plan = 1;
-
-	if (plan == 1)
-	{
-		// plan1. 100ms固定间隔单步状态
-		if (rlcc->timestamp + SAMPLE_INTERVAL <= current_time)
-		{
-			rlcc->rlcc_lost++;
-		}
-		else
-		{
-			rlcc->rlcc_lost = 0;
-		}
-	}
-
-	if (plan == 2)
-	{
-		// plan2. 双rtt 统计最近间隔内的丢包情况状态
-		if (rlcc->sample_start <= current_time)
-		{
-			rlcc->rlcc_lost++;
-		}
-
-		if (rlcc->sample_stop < current_time)
-		{
-			rlcc->rlcc_lost = 0;
-		}
-	}
 
 	return;
 }

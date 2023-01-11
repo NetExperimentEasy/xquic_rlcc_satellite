@@ -29,8 +29,6 @@ typedef struct xqc_sample_s {
     /* whether packet loss */
     uint32_t         loss;
     uint64_t         total_acked;
-    /* sended : rlcc */
-    uint64_t         total_sended;
     xqc_usec_t       srtt;
     /* used to determine if generate_sample needs to be called */
     xqc_usec_t       prior_time;
@@ -68,7 +66,7 @@ void xqc_update_sample(xqc_sample_t *sample, xqc_packet_out_t *packet,
 xqc_bool_t xqc_sample_check_app_limited(xqc_sample_t *sampler, 
     xqc_send_ctl_t *send_ctl);
 /* add sampler to sample total_sended : rlcc */
-void xqc_sample_on_sent(xqc_sample_t *sample, xqc_packet_out_t *packet_out,
+void xqc_sample_on_sent(xqc_packet_out_t *packet_out,
     xqc_send_ctl_t *ctl, xqc_usec_t now);
 
 #endif

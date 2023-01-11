@@ -29,8 +29,9 @@ typedef struct xqc_rlcc_s {
     xqc_usec_t              sample_stop;
     xqc_usec_t              rtt;
     xqc_usec_t              srtt;
-    uint32_t                rlcc_lost;   // on loss times
-    uint32_t                lost;       // sampler lost
+    int32_t                 lost_interval;   // 记录采用状态周期内出现的丢包数
+    uint32_t                lost;       // 双rtt方案，平滑lost ：lost_pkts
+    uint32_t                before_lost;    // lost_pkts的记录点，用于计算lost_interval
     uint32_t                delivery_rate;
     uint32_t                inflight;
     uint32_t                prior_cwnd;
