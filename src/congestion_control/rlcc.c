@@ -281,11 +281,13 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->srtt = XQC_RLCC_INF;
 	rlcc->rlcc_lost = 0;
 	rlcc->delivery_rate = 0;
-	rlcc->soft_delivery_rate = 0;
 	rlcc->prior_cwnd = rlcc->cwnd;
 	rlcc->min_rtt = rlcc->rtt;
 	rlcc->is_slow_start = XQC_FALSE;
 	rlcc->in_recovery = XQC_FALSE;
+	rlcc->throughput = 0;
+	rlcc->sended_timestamp = rlcc->timestamp;
+	rlcc->before_total_sended = 0;
 
 	// for satcc action
 	rlcc->cwnd_int = XQC_RLCC_INIT_WIN_INT;
@@ -338,13 +340,15 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 *  prior_inflight : uint32_t : 处理此ack前的inflight
 	 *  rtt : xqc_usec_t : 采样区间测得的rtt
 	 *  is_app_limited : uint32_t :
-	 *  loss : uint32_t : 目测是周期内的丢包数
+	 *  loss : uint32_t : 周期内的丢包数
 	 *  total_acked : uint64_t : 总acked数
 	 *  srtt : xqc_usec_t
 	 *  delivery_rate : uint32_t : (uint64_t)(1e6 * sampler->delivered / sampler->interval);
 	 *  prior_lost : uint32_t : bbr2用于判断丢包是否过快, 此包发送前的丢包数  但是这个丢包数很诡异，应该是减去了已经重传的包
 	 *  tx_in_flight ： 此包发送时的inflight（包括此包）
 	 *  lost_pkts : uint32 : bbr2用于判断丢包是否过快，目前为止的丢包总数-此包发送前的丢包数
+	 * 
+	 *  total_sended : 自己增加的字段：每次on_sent的时候，total_sended = ctl->ctl_bytes_send += packet_out->po_used_size;
 	 */
 
 	/*
@@ -391,16 +395,6 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	// 	rlcc->min_rtt_timestamp = current_time;
 	// }
 
-	if (rlcc->soft_delivery_rate == 0)
-	{
-		rlcc->soft_delivery_rate = sampler->delivery_rate;
-	}
-	else
-	{
-		rlcc->soft_delivery_rate -= rlcc->soft_delivery_rate >> 3;
-		rlcc->soft_delivery_rate += sampler->delivery_rate >> 3;
-	}
-
 	int plan = 2; // plan 1 100ms; plan 2 double rtt sample
 
 	if (plan == 1)
@@ -411,10 +405,14 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 			rlcc->timestamp = current_time; // 更新时间戳
 
+			rlcc->throughput = 1e6 * (sampler->total_sended - rlcc->before_total_sended) / (current_time - rlcc->sended_timestamp);
+			rlcc->sended_timestamp = current_time;
+			rlcc->before_total_sended = sampler->total_sended;
+
 			if (rlcc->rlcc_path_flag)
 			{
 				char value[500] = {0};
-				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;soft_delivery_rate:%d",
+				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d",
 				// rlcc->cwnd,
 				// rlcc->pacing_rate,
 				// sampler->rtt,
@@ -425,7 +423,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 				// sampler->lost_pkts,
 				// sampler->is_app_limited,
 				// sampler->delivery_rate,
-				// rlcc->soft_delivery_rate);
+				// rlcc->throughput);
 				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d",
 						(rlcc->cwnd >> 10),
 						(rlcc->pacing_rate >> 10),
@@ -437,7 +435,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						sampler->lost_pkts,
 						sampler->is_app_limited,
 						sampler->delivery_rate,
-						rlcc->soft_delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
+						rlcc->throughput); // delivery_rate 与 throughput 不作为状态，作为单独的奖励计算使用
 				pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal
@@ -465,6 +463,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->inflight = sampler->bytes_inflight;
 			rlcc->lost = sampler->lost_pkts;
 			rlcc->delivery_rate = sampler->delivery_rate;
+			rlcc->before_total_sended = sampler->total_sended;
+			rlcc->sended_timestamp = current_time;
 		}
 
 		if (rlcc->sample_start <= current_time)
@@ -495,11 +495,13 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->timestamp = current_time;
 			rlcc->sample_start = current_time + rlcc->min_rtt;
 			rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
+			
+			rlcc->throughput = 1e6 * (sampler->total_sended - rlcc->before_total_sended) / (current_time - rlcc->sended_timestamp);
 
 			if (rlcc->rlcc_path_flag)
 			{
 				char value[500] = {0};
-				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;soft_delivery_rate:%d",
+				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;rlcc_lost:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d",
 				// rlcc->cwnd,
 				// rlcc->pacing_rate,
 				// sampler->rtt,
@@ -510,7 +512,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 				// sampler->lost_pkts,
 				// sampler->is_app_limited,
 				// sampler->delivery_rate
-				// rlcc->soft_delivery_rate);
+				// rlcc->throughput);
 				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d",
 						(rlcc->cwnd >> 10),
 						(rlcc->pacing_rate >> 10),
@@ -521,8 +523,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						rlcc->rlcc_lost,
 						rlcc->lost,
 						sampler->is_app_limited,
-						rlcc->delivery_rate,
-						rlcc->soft_delivery_rate); // delivery_rate 不作为状态，作为单独的奖励计算使用
+						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
+						rlcc->throughput); // 
 				pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal

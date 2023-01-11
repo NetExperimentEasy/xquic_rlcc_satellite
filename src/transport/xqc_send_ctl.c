@@ -977,7 +977,9 @@ xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *ctl, xqc_packet_out_t *packet_out, x
 {
     xqc_pkt_num_space_t pns = packet_out->po_pkt.pkt_pns;
 
-    xqc_sample_on_sent(packet_out, ctl, now);
+    ctl->ctl_bytes_send += packet_out->po_used_size;
+    // add sended first, then update sampler
+    xqc_sample_on_sent(&ctl->sampler, packet_out, ctl, now);  /* sample sended : rlcc */
 
     xqc_packet_number_t orig_pktnum = packet_out->po_origin ? packet_out->po_origin->po_pkt.pkt_num : 0;
     xqc_log(ctl->ctl_conn->log, XQC_LOG_DEBUG,
@@ -991,8 +993,6 @@ xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *ctl, xqc_packet_out_t *packet_out, x
     if (packet_out->po_pkt.pkt_num > ctl->ctl_largest_sent[pns]) {
         ctl->ctl_largest_sent[pns] = packet_out->po_pkt.pkt_num;
     }
-
-    ctl->ctl_bytes_send += packet_out->po_used_size;
 
     if (XQC_CAN_IN_FLIGHT(packet_out->po_frame_types)) {
 

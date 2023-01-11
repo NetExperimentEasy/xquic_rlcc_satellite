@@ -145,7 +145,7 @@ xqc_sample_check_app_limited(xqc_sample_t *sampler, xqc_send_ctl_t *send_ctl)
 }
 
 void 
-xqc_sample_on_sent(xqc_packet_out_t *packet_out, xqc_send_ctl_t *ctl, 
+xqc_sample_on_sent(xqc_sample_t *sampler, xqc_packet_out_t *packet_out, xqc_send_ctl_t *ctl, 
     xqc_usec_t now)
 {
     if (ctl->ctl_bytes_in_flight == 0) {
@@ -158,4 +158,6 @@ xqc_sample_on_sent(xqc_packet_out_t *packet_out, xqc_send_ctl_t *ctl,
     packet_out->po_lost = ctl->ctl_lost_pkts_number;
     packet_out->po_tx_in_flight = ctl->ctl_bytes_in_flight + 
                                   packet_out->po_used_size;
+
+    sampler->total_sended = ctl->ctl_bytes_send;
 }

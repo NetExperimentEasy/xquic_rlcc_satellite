@@ -32,7 +32,6 @@ typedef struct xqc_rlcc_s {
     uint32_t                rlcc_lost;   // on loss times
     uint32_t                lost;       // sampler lost
     uint32_t                delivery_rate;
-    uint32_t                soft_delivery_rate;
     uint32_t                inflight;
     uint32_t                prior_cwnd;
     uint32_t                prior_pacing_rate;
@@ -50,6 +49,11 @@ typedef struct xqc_rlcc_s {
     uint8_t                 up_times;
     uint8_t                 down_times;
     uint8_t                 up_n;
+
+    // cacu throughput by total_sended
+    uint64_t                before_total_sended;
+    xqc_usec_t              sended_timestamp;
+    uint32_t                throughput;
 
 } xqc_rlcc_t;
 
