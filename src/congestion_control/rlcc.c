@@ -480,21 +480,21 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 		{
 			// sample
 			rlcc->rtt -= rlcc->rtt >> 2;
-			rlcc->rtt += sampler->rtt >> 2;
+			rlcc->rtt += (sampler->rtt >> 2);
 
 			rlcc->srtt -= rlcc->srtt >> 2;
-			rlcc->srtt += sampler->srtt >> 2;
+			rlcc->srtt += (sampler->srtt >> 2);
 
 			rlcc->inflight -= rlcc->inflight >> 2;
-			rlcc->inflight += sampler->bytes_inflight >> 2;
+			rlcc->inflight += (sampler->bytes_inflight >> 2);
 
 			// printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
 			rlcc->lost -= rlcc->lost >> 2;
-			rlcc->lost += sampler->lost_pkts >> 2;
+			rlcc->lost += (sampler->lost_pkts >> 2);
 			// printf("rlcc lost after %d", rlcc->lost);
 
 			rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
-			rlcc->delivery_rate += sampler->delivery_rate >> 2;
+			rlcc->delivery_rate += (sampler->delivery_rate >> 2);
 		}
 
 		if (rlcc->sample_stop <= current_time)
