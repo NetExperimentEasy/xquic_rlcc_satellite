@@ -1,6 +1,7 @@
 /**
  * @copyright Copyright (c) 2022, jinyaoliu
  */
+
 #include "src/congestion_control/rlcc.h"
 #include <math.h>
 #include "src/common/xqc_time.h"
@@ -11,51 +12,64 @@
 #include <time.h>
 #include <hiredis/hiredis.h>
 
-#define XQC_RLCC_MSS 1460
-#define MONITOR_INTERVAL 100
-#define XQC_RLCC_INIT_WIN (32 * XQC_RLCC_MSS)
-#define XQC_RLCC_INIT_WIN_INT 32
-#define XQC_RLCC_MIN_WINDOW (4 * XQC_RLCC_MSS)
-#define XQC_RLCC_MIN_WINDOW_INT 4
-#define PACING_GAIN 1.2
-#define XQC_RLCC_INF 0x7fffffff
-#define SAMPLE_INTERVAL 100000 // 100ms
+#define XQC_RLCC_MSS 				XQC_MSS
+#define MONITOR_INTERVAL 			100
+#define XQC_RLCC_INIT_WIN 			(32 * XQC_RLCC_MSS)
+#define XQC_RLCC_INIT_WIN_INT 		32		
+#define XQC_RLCC_MIN_WINDOW 		(4 * XQC_RLCC_MSS)
+#define XQC_RLCC_MIN_WINDOW_INT 	4
+/* when only use pacing_rate, let cwnd bigger than caculated cwnd. */ 
+#define CWND_GAIN	 				1.2
+#define XQC_RLCC_INF 				0x7fffffff
+#define SAMPLE_INTERVAL 			100000 // 100ms
 // #define SAMPLE_INTERVAL				1000000		// 1000ms
-#define PROBE_INTERVAL 2000000 // 2s
-// #define PROBE_INTERVAL 10000000 // 10s
+#define PROBE_INTERVAL 				2000000 // 2s
+// #define PROBE_INTERVAL 				10000000 // 10s
+#define XQC_DEFAULT_PACING_RATE (((2 * XQC_MSS * 1000000ULL)/(XQC_kInitialRtt * 1000)))
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
-const uint32_t max_xqc = 2147483647; // 0<<1
+const uint64_t xqc_max = ~0;
 
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// satcc action val
+/* satcc action preset data */ 
 static int up_actions_list[8] = {30,150,750,3750,18750,93750,468750,2343750};
 static int down_actions_list[8] = {1,3,5,9,15,21,33,51};
 
+
+/* see xqc_pacing.c xqc_pacing_rate_calc */
 static void
-xqc_rlcc_cac_pacing_rate_by_cwnd(xqc_rlcc_t *rlcc)
-{
-	// PACING_GAIN make sending queue always drain out
-	// rlcc->pacing_rate = PACING_GAIN * (rlcc->cwnd / (rlcc->srtt ? rlcc->srtt : 1000)) * (uint64_t)MSEC2SEC;
-	rlcc->pacing_rate = (rlcc->cwnd / (rlcc->srtt ? rlcc->srtt : 1000)) * (uint64_t)MSEC2SEC;
-	// rlcc->pacing_rate = xqc_max(rlcc->pacing_rate, XQC_RLCC_MSS);
-	rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_RLCC_MSS, max_xqc);
+xqc_rlcc_calc_pacing_rate_by_cwnd(xqc_rlcc_t *rlcc)
+{	
+	xqc_usec_t srtt = rlcc->srtt;
+    if (srtt == 0) {
+        srtt = XQC_kInitialRtt * 1000;
+    }
+	rlcc->pacing_rate = (rlcc->cwnd * (uint64_t)MSEC2SEC / srtt);
+	rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_DEFAULT_PACING_RATE, xqc_max);
 	return;
 }
 
+/* when use pacing_rate action, set matching rate by cwnd */
 static void
-xqc_rlcc_cac_cwnd_by_pacing_rate(xqc_rlcc_t *rlcc)
-{
-	rlcc->cwnd = (rlcc->pacing_rate / (uint64_t)MSEC2SEC) * (rlcc->srtt ? rlcc->srtt : 1000);
-	rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, max_xqc);
-	// rlcc->cwnd_int = rlcc->cwnd / XQC_RLCC_MSS; // only action paln 1 needs this func, so it has no nessasery to cacu this
+xqc_rlcc_calc_cwnd_by_pacing_rate(xqc_rlcc_t *rlcc)
+{	
+	xqc_usec_t srtt = rlcc->srtt;
+    if (srtt == 0) {
+        srtt = XQC_kInitialRtt * 1000;
+    }
+	rlcc->cwnd = CWND_GAIN * (rlcc->pacing_rate * srtt / (uint64_t)MSEC2SEC);
+	rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, xqc_max);
 	return;
 }
 
+
+/*
+ * interface by redis pub/sub
+ */
 static void
-getRedisConn(xqc_rlcc_t *rlcc)
+get_redis_conn(xqc_rlcc_t *rlcc)
 {	
 	rlcc->redis_conn_listener = redisConnect(rlcc->redis_host, rlcc->redis_port);
 	rlcc->redis_conn_publisher = redisConnect(rlcc->redis_host, rlcc->redis_port);
@@ -79,7 +93,7 @@ getRedisConn(xqc_rlcc_t *rlcc)
 }
 
 static void
-pushState(redisContext *conn, u_int32_t key, char *value)
+push_state(redisContext *conn, u_int32_t key, char *value)
 {
 	/* publish state */
 	redisReply *reply;
@@ -92,14 +106,17 @@ pushState(redisContext *conn, u_int32_t key, char *value)
 	return;
 }
 
+/* get action from redis */
 static void
-getResultFromReply(redisReply *reply, xqc_rlcc_t *rlcc)
+get_result_from_reply(redisReply *reply, xqc_rlcc_t *rlcc)
 {
 	float cwnd_rate;
 	float pacing_rate_rate;
 	int cwnd_value;
 
-	int plan = 1; 
+	int plan = 2; 
+	/* TODO: use *function to replace plan */
+
 	// plan 1 : control by multiply rate; 
 	// plan 2 : control by add rate; owl action space
 	// plan 3 : satcc action space
@@ -130,12 +147,12 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t *rlcc)
 
 			if (cwnd_rate == 0)
 			{
-				xqc_rlcc_cac_cwnd_by_pacing_rate(rlcc);
+				xqc_rlcc_calc_cwnd_by_pacing_rate(rlcc);
 			}
 
 			if (pacing_rate_rate == 0)
 			{ // use cwnd update pacing_rate
-				xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
+				xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
 			}
 
 			if (rlcc->cwnd < XQC_RLCC_MIN_WINDOW)
@@ -158,7 +175,7 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t *rlcc)
 				rlcc->cwnd_int = XQC_RLCC_MIN_WINDOW_INT; // base cwnd
 			}
 			rlcc->cwnd = rlcc->cwnd_int * XQC_RLCC_MSS;
-			xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
+			xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
 		}
 
 		if (plan == 3) {
@@ -225,7 +242,7 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t *rlcc)
 
 			rlcc->cwnd = rlcc->cwnd_int * XQC_RLCC_MSS;
 
-			xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
+			xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
 		}
 
 		// printf("after cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
@@ -253,8 +270,9 @@ subscribe(redisContext *conn, xqc_rlcc_t *rlcc)
 	return;
 }
 
-void *
-getActionT(void *arg)
+/* thread function */
+static void *
+get_action(void *arg)
 {
 	int redis_err = 0;
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)arg;
@@ -265,12 +283,17 @@ getActionT(void *arg)
 		pthread_cond_wait(&cond, &mutex_lock);
 		if ((redis_err = redisGetReply(rlcc->redis_conn_listener, &reply)) == REDIS_OK)
 		{
-			getResultFromReply((redisReply *)reply, rlcc);
+			get_result_from_reply((redisReply *)reply, rlcc);
 			freeReplyObject(reply);
 		}
 		pthread_mutex_unlock(&mutex_lock);
 	}
 }
+
+
+/*
+ * rlcc
+ */
 
 static void
 xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params)
@@ -281,7 +304,7 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->cwnd = XQC_RLCC_INIT_WIN;
 	rlcc->timestamp = xqc_monotonic_timestamp();
 	rlcc->rtt = XQC_RLCC_INF;
-	rlcc->srtt = XQC_RLCC_INF;
+	rlcc->srtt = 0;	/* let srtt=rtt when srtt==0; sampler's srtt starts with a big value */
 	rlcc->lost_interval = 0;
 	rlcc->lost = 0;
 	rlcc->before_lost = 0;
@@ -291,8 +314,8 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->is_slow_start = XQC_FALSE;
 	rlcc->in_recovery = XQC_FALSE;
 	rlcc->throughput = 0;
-	rlcc->sended_timestamp = xqc_monotonic_timestamp();
-	rlcc->before_total_sended = 0;
+	rlcc->sent_timestamp = xqc_monotonic_timestamp();
+	rlcc->before_total_sent = 0;
 
 	// for satcc action
 	rlcc->cwnd_int = XQC_RLCC_INIT_WIN_INT;
@@ -300,7 +323,7 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 	rlcc->down_times = 0;
 	rlcc->up_times = 0;
 
-	xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
+	xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
 	rlcc->prior_pacing_rate = rlcc->pacing_rate;
 
 	if (cc_params.customize_on)
@@ -310,11 +333,11 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 		rlcc->redis_port = cc_params.redis_port;
 	}
 
-	getRedisConn(rlcc);
+	get_redis_conn(rlcc);
 
 	if (rlcc->rlcc_path_flag)
 	{
-		pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, "state:init");
+		push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, "state:init");
 		subscribe(rlcc->redis_conn_listener, rlcc);
 	}
 	else
@@ -323,12 +346,28 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 		freeReplyObject(error);
 	}
 
-	// another thread to get action from redis by cond signal
+	/* thread that get action from redis by cond signal */
 	pthread_t tid;
-	pthread_create(&tid, NULL, getActionT, (void *)rlcc);
+	pthread_create(&tid, NULL, get_action, (void *)rlcc);
 	pthread_detach(tid);
 
 	return;
+}
+
+static void
+probe_minrtt(xqc_rlcc_t *rlcc, xqc_sample_t *sampler)
+{
+	/* update min rtt */
+	if (rlcc->min_rtt == 0 || sampler->rtt < rlcc->min_rtt)
+	{
+		rlcc->min_rtt = sampler->rtt;
+		rlcc->min_rtt_timestamp = sampler->now; // min_rtt_timestamp use sampler's now
+	}
+
+	/* How to probe */
+	/* BBR : cwnd = 4 with 200ms */
+	/* 强化学习类算法行为不是绝对稳定，故其无法像xquic bbr那样采用2.5s 75%的方式探索minRTT */
+	/* TODO，排队队列预测机制，达到一个阈值就派出那个阈值的数据量来进行min_rtt测量 */
 }
 
 static void
@@ -337,7 +376,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 
 	/*	sampler
-	 *  prior_delivered : uint64_t : 当前确认的数据包发送前的交付数, 存疑
+	 *  prior_delivered : uint64_t : 当前确认的数据包发送前的交付数
 	 *	interval : xqc_usec_t : 两次采样的间隔时间，稍大于约1rtt的时间
 	 *  delivered : uint32_t : 采样区间内的交付数
 	 *  acked : uint32_t : 最新一次被ack的数据的大小
@@ -354,8 +393,9 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	 *  lost_pkts : uint32 : bbr2用于判断丢包是否过快，目前为止的丢包总数-此包发送前的丢包数
 	 *     一种计算采样周期丢包率的方法：
 	 * 			记录lost_pkts差（lost_interval），除以此周期的发包数
+	 * 	TODO:	目前为之的丢包总数 - 上个周期的丢包总数 来作为此周期的丢包书
 	 * 
-	 *  total_sended  ctl->ctl_bytes_send 
+	 *  total_sent  ctl->ctl_bytes_send
 	 */
 
 	// printf("debug:pd:%ld, i:%ld, d:%d, a:%d, bi:%d, pi:%d, r:%ld, ial:%d, l:%d, ta:%ld, s:%ld, dr:%d, pl:%d, lp:%d\n",
@@ -376,65 +416,36 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 	xqc_usec_t current_time = xqc_monotonic_timestamp();
 
-	// update min rtt
-	if (rlcc->min_rtt == 0 || sampler->rtt < rlcc->min_rtt)
-	{
-		rlcc->min_rtt = sampler->rtt;
-		rlcc->min_rtt_timestamp = sampler->now; // min_rtt_timestamp use sampler now
-	}
-
-	// cancel probeRTT while train
-	// probeRTT : simplely force update min_rtt every 2s | 10s
-
-	// mute while train agent at fix env; changing env needs a method to get true min_rtt
-	// if (rlcc->min_rtt_timestamp + PROBE_INTERVAL <= current_time)
-	// {
-	// 	// before
-	// 	// rlcc->min_rtt = sampler->rtt;
-	// 	// new method
-	// 	xqc_usec_t tmp_rtt = rlcc->min_rtt + (rlcc->min_rtt >> 4);
-	// 	rlcc->min_rtt = xqc_min(sampler->rtt, tmp_rtt);
-
-	// 	rlcc->min_rtt_timestamp = current_time;
-	// }
+	probe_minrtt(rlcc, sampler);
 
 	int plan = 2; // plan 1 100ms; plan 2 double rtt sample
 
+	/* TODO: use *function to replace plan */
+
 	if (plan == 1)
 	{
-		// plan1. 100ms固定间隔单步状态(取最近一次ack的sampler结果)
+		/* plan1. 100ms fixed monitor interval (get data from xqc_sampler) */ 
 		if (rlcc->timestamp + SAMPLE_INTERVAL <= current_time)
-		{ // 100000 100ms交互一次
+		{ // 100000 100ms
 
 			rlcc->timestamp = current_time; // 更新时间戳
-			uint32_t sended_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sended;
-			rlcc->throughput = 1e6 * sended_interval / (current_time - rlcc->sended_timestamp);
-			rlcc->sended_timestamp = current_time;
-			rlcc->before_total_sended = sampler->send_ctl->ctl_bytes_send;
+			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
+			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
+			rlcc->sent_timestamp = current_time;
+			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
 			
 			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
 			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 			rlcc->before_lost = sampler->lost_pkts;
 
 			if (rlcc->rlcc_path_flag)
-			{
+			{	
+				uint32_t cwnd = rlcc->cwnd >> 10;
+				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
 				char value[500] = {0};
-				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;lost_interval:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d;sended_interval:%d",
-				// rlcc->cwnd,
-				// rlcc->pacing_rate,
-				// sampler->rtt,
-				// rlcc->min_rtt,
-				// sampler->srtt,
-				// sampler->bytes_inflight,
-				// rlcc->lost_interval,
-				// sampler->lost_pkts,
-				// sampler->is_app_limited,
-				// sampler->delivery_rate,
-				// rlcc->throughput,
-				// sended_interval);
 				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
-						(rlcc->cwnd >> 10),
-						(rlcc->pacing_rate >> 10),
+						cwnd,
+						pacing_rate,
 						sampler->rtt,
 						rlcc->min_rtt,
 						sampler->srtt,
@@ -444,8 +455,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						sampler->is_app_limited,
 						sampler->delivery_rate,
 						rlcc->throughput, // delivery_rate 与 throughput 不作为状态，作为单独的奖励计算使用
-						sended_interval);
-				pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
+						sent_interval);
+				push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal
 				pthread_cond_signal(&cond);
@@ -461,20 +472,20 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 	if (plan == 2)
 	{
-		// plan2. 双rtt 半rtt状态
+		// plan2. double rtt sample method
 		// xqc_usec_t time_interval;
 
 		if (rlcc->sample_start > current_time)
 		{
-			// 开始采样前持续更新到最新的sampler
+			// before sample
 			rlcc->rtt = sampler->rtt;
-			rlcc->srtt = sampler->srtt;
+			rlcc->srtt = rlcc->rtt; /* starts with rtt, then update with sampler's srtt */
 			rlcc->inflight = sampler->bytes_inflight;
 			rlcc->lost = sampler->lost_pkts;
 			rlcc->delivery_rate = sampler->delivery_rate;
 			
-			rlcc->before_total_sended = sampler->send_ctl->ctl_bytes_send;
-			rlcc->sended_timestamp = current_time;
+			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
+			rlcc->sent_timestamp = current_time;
 
 			rlcc->before_lost = sampler->lost_pkts;
 		}
@@ -508,31 +519,20 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->sample_start = current_time + rlcc->min_rtt;
 			rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
 			
-			uint32_t sended_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sended;
-			rlcc->throughput = 1e6 * sended_interval / (current_time - rlcc->sended_timestamp);
+			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
+			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
 			
 			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
 			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 
 			if (rlcc->rlcc_path_flag)
-			{
+			{	
+				uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
+				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
 				char value[500] = {0};
-				// sprintf(value, "cwnd:%ld;pacing_rate:%ld;rtt:%ld;min_rtt:%ld;srtt:%ld;inflight:%ld;lost_interval:%d;lost:%d;is_app_limited:%d;delivery_rate:%d;throughput:%d;sended_interval:%d",
-				// rlcc->cwnd,
-				// rlcc->pacing_rate,
-				// sampler->rtt,
-				// rlcc->min_rtt,
-				// sampler->srtt,
-				// sampler->bytes_inflight,
-				// rlcc->lost_interval,
-				// sampler->lost_pkts,
-				// sampler->is_app_limited,
-				// sampler->delivery_rate,
-				// rlcc->throughput,
-				// sended_interval);
 				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
-						(rlcc->cwnd >> 10),
-						(rlcc->pacing_rate >> 10),
+						cwnd,		
+						pacing_rate,
 						rlcc->rtt,
 						rlcc->min_rtt,
 						rlcc->srtt,
@@ -542,8 +542,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						sampler->is_app_limited,
 						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
 						rlcc->throughput,
-						sended_interval); // 
-				pushState(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
+						sent_interval);
+				push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal
 				pthread_cond_signal(&cond);
@@ -559,12 +559,15 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 	return;
 }
 
+/*
+ * Other functions
+ */
+
 static void
 xqc_rlcc_on_lost(void *cong_ctl, xqc_usec_t lost_sent_time)
 {
-	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-	xqc_usec_t current_time = xqc_monotonic_timestamp();
-
+	// xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
+	// xqc_usec_t current_time = xqc_monotonic_timestamp();
 	return;
 }
 
@@ -581,6 +584,7 @@ xqc_rlcc_reset_cwnd(void *cong_ctl)
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
 	rlcc->cwnd = XQC_RLCC_MIN_WINDOW;
 	rlcc->cwnd_int = XQC_RLCC_MIN_WINDOW_INT;
+	xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
 	return;
 }
 
@@ -597,16 +601,11 @@ xqc_rlcc_get_pacing_rate(void *cong_ctl)
 	return rlcc->pacing_rate;
 }
 
-static uint32_t
-xqc_rlcc_get_bandwidth(void *cong_ctl)
-{
-	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-	return rlcc->delivery_rate;
-}
-
 static void
 xqc_rlcc_restart_from_idle(void *cong_ctl, uint64_t conn_delivered)
-{
+{	
+	/* will be called when ctl->ctl_bytes_in_flight == 0 */
+	/* current do nothing */ 
 	return;
 }
 
@@ -614,14 +613,7 @@ static int
 xqc_rlcc_in_recovery(void *cong)
 {
 	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong);
-	return rlcc->in_recovery; // never in in recovery, all control by cc RL
-}
-
-int32_t
-xqc_rlcc_in_slow_start(void *cong_ctl)
-{
-	xqc_rlcc_t *rlcc = (xqc_rlcc_t *)(cong_ctl);
-	return rlcc->is_slow_start; // nerver in slow start, all control by cc RL
+	return rlcc->in_recovery; /* never in recovery, all control by reinforcement learning */ 
 }
 
 const xqc_cong_ctrl_callback_t xqc_rlcc_cb = {
@@ -631,9 +623,8 @@ const xqc_cong_ctrl_callback_t xqc_rlcc_cb = {
 	.xqc_cong_ctl_on_ack_multiple_pkts = xqc_rlcc_on_ack, // bind with change pacing rate
 	// .xqc_cong_ctl_on_ack				= xqc_rlcc_on_ack,	// only change cwnd
 	.xqc_cong_ctl_get_cwnd = xqc_rlcc_get_cwnd,
+	.xqc_cong_ctl_get_pacing_rate = xqc_rlcc_get_pacing_rate,
 	.xqc_cong_ctl_reset_cwnd = xqc_rlcc_reset_cwnd,
-	.xqc_cong_ctl_in_slow_start = xqc_rlcc_in_slow_start,
 	.xqc_cong_ctl_restart_from_idle = xqc_rlcc_restart_from_idle,
 	.xqc_cong_ctl_in_recovery = xqc_rlcc_in_recovery,
-	.xqc_cong_ctl_get_pacing_rate = xqc_rlcc_get_pacing_rate,
 };

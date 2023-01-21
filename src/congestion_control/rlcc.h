@@ -14,9 +14,9 @@
 #define MSEC2SEC 1000000
 
 typedef struct xqc_rlcc_s {
-    uint32_t                cwnd;
+    uint64_t                cwnd;
     /* Current pacing rate */
-    uint32_t                pacing_rate;
+    uint64_t                pacing_rate;
     redisContext*           redis_conn_listener;
     redisContext*           redis_conn_publisher;
     void*                   reply; // subscribe
@@ -28,14 +28,14 @@ typedef struct xqc_rlcc_s {
     xqc_usec_t              sample_start;   // 双rtt采样法的采样起止时间，更新timestamp时，更新这两个时间
     xqc_usec_t              sample_stop;
     xqc_usec_t              rtt;
-    xqc_usec_t              srtt;
-    int32_t                 lost_interval;   // 记录采用状态周期内出现的丢包数
+    xqc_usec_t              srtt;           /* rlcc->srtt is the srtt of sample interval */
+    int32_t                 lost_interval;   // 记录采样状态周期内出现的丢包数
     uint32_t                lost;       // 双rtt方案，平滑lost ：lost_pkts
     uint32_t                before_lost;    // lost_pkts的记录点，用于计算lost_interval
     uint32_t                delivery_rate;
     uint32_t                inflight;
-    uint32_t                prior_cwnd;
-    uint32_t                prior_pacing_rate;
+    uint64_t                prior_cwnd;
+    uint64_t                prior_pacing_rate;
     xqc_usec_t              min_rtt;
     xqc_usec_t              min_rtt_timestamp;
 
@@ -51,9 +51,9 @@ typedef struct xqc_rlcc_s {
     uint8_t                 down_times;
     uint8_t                 up_n;
 
-    // cacu throughput by total_sended
-    uint64_t                before_total_sended;
-    xqc_usec_t              sended_timestamp;
+    // cacu throughput by total_sent
+    uint64_t                before_total_sent;
+    xqc_usec_t              sent_timestamp;
     uint32_t                throughput;
 
 } xqc_rlcc_t;
