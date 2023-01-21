@@ -162,11 +162,11 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t *rlcc)
 			// satcc mode also only use cwnd
 			// cwnd_value : int , 1:up, -1:down ,0:stay
 			sscanf(reply->element[2]->str, "%d", &cwnd_value);
-			
+			int a;
 			switch (cwnd_value)
 			{
 			case 1:
-				int a = up_actions_list[rlcc->up_n] / rlcc->cwnd_int;
+				a = up_actions_list[rlcc->up_n] / rlcc->cwnd_int;
 				if(a==0) a=1;
 				rlcc->cwnd_int = rlcc->cwnd_int + a;
 
