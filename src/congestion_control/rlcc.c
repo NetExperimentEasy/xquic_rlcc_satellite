@@ -147,14 +147,17 @@ getResultFromReply(redisReply *reply, xqc_rlcc_t *rlcc)
 		if (plan == 2) {
 			// add mode only use cwnd
 			// cwnd_value : int , [-n, n]
+			int tmp;
 			sscanf(reply->element[2]->str, "%d", &cwnd_value);
-
-			rlcc->cwnd += cwnd_value;
-			if (rlcc->cwnd < XQC_RLCC_MIN_WINDOW)
-			{
-				rlcc->cwnd = XQC_RLCC_MIN_WINDOW; // base cwnd
+			tmp = cwnd_value > 0 ? cwnd_value : -cwnd_value;
+			if (rlcc->cwnd_int >= tmp || cwnd_value > 0){
+				rlcc->cwnd_int += cwnd_value;
 			}
-
+			if (rlcc->cwnd_int < XQC_RLCC_MIN_WINDOW_INT)
+			{
+				rlcc->cwnd_int = XQC_RLCC_MIN_WINDOW_INT; // base cwnd
+			}
+			rlcc->cwnd = rlcc->cwnd_int * XQC_RLCC_MSS;
 			xqc_rlcc_cac_pacing_rate_by_cwnd(rlcc);
 		}
 
