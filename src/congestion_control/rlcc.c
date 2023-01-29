@@ -114,7 +114,7 @@ get_result_from_reply(redisReply *reply, xqc_rlcc_t *rlcc)
 	float pacing_rate_rate;
 	int cwnd_value;
 
-	int plan = 2; 
+	int plan = 3; 
 	/* TODO: use *function to replace plan */
 
 	// plan 1 : control by multiply rate; 
@@ -472,7 +472,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 	if (plan == 2)
 	{
-		// plan2. double rtt sample method
+		// plan2. minrtt+100ms sample method
 		// xqc_usec_t time_interval;
 
 		if (rlcc->sample_start > current_time)
@@ -518,6 +518,93 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->timestamp = current_time;
 			rlcc->sample_start = current_time + rlcc->min_rtt;
 			rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
+			
+			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
+			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
+			
+			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
+			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
+
+			if (rlcc->rlcc_path_flag)
+			{	
+				uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
+				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
+				char value[500] = {0};
+				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
+						cwnd,		
+						pacing_rate,
+						rlcc->rtt,
+						rlcc->min_rtt,
+						rlcc->srtt,
+						rlcc->inflight,
+						rlcc->lost_interval,
+						rlcc->lost,
+						sampler->is_app_limited,
+						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
+						rlcc->throughput,
+						sent_interval);
+				push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
+				pthread_mutex_lock(&mutex_lock);
+				// send signal
+				pthread_cond_signal(&cond);
+				pthread_mutex_unlock(&mutex_lock);
+			}
+			else
+			{
+				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
+				freeReplyObject(error);
+			}
+		}
+	}
+
+	if (plan == 3)
+	{
+		// plan3. double rtt sample method
+		// xqc_usec_t time_interval;
+
+		if (rlcc->sample_start > current_time)
+		{
+			// before sample
+			rlcc->rtt = sampler->rtt;
+			rlcc->srtt = rlcc->rtt; /* starts with rtt, then update with sampler's srtt */
+			rlcc->inflight = sampler->bytes_inflight;
+			rlcc->lost = sampler->lost_pkts;
+			rlcc->delivery_rate = sampler->delivery_rate;
+			
+			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
+			rlcc->sent_timestamp = current_time;
+
+			rlcc->before_lost = sampler->lost_pkts;
+		}
+
+		if (rlcc->sample_start <= current_time)
+		{
+			// sample
+			rlcc->rtt -= rlcc->rtt >> 2;
+			rlcc->rtt += (sampler->rtt >> 2);
+
+			rlcc->srtt -= rlcc->srtt >> 2;
+			rlcc->srtt += (sampler->srtt >> 2);
+
+			rlcc->inflight -= rlcc->inflight >> 2;
+			rlcc->inflight += (sampler->bytes_inflight >> 2);
+
+			// printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
+			rlcc->lost -= rlcc->lost >> 2;
+			rlcc->lost += (sampler->lost_pkts >> 2);
+			// printf("rlcc lost after %d", rlcc->lost);
+
+			rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
+			rlcc->delivery_rate += (sampler->delivery_rate >> 2);
+		}
+
+		if (rlcc->sample_stop <= current_time)
+		{
+			// stop sample and send signal
+
+			rlcc->timestamp = current_time;
+			rlcc->sample_start = current_time + rlcc->min_rtt;
+			rlcc->sample_stop = rlcc->sample_start + rlcc->min_rtt; // double minRTT
 			
 			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
 			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
