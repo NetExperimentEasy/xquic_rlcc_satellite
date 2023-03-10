@@ -288,6 +288,7 @@ get_action(void *arg)
 		}
 		pthread_mutex_unlock(&mutex_lock);
 	}
+	return 0;
 }
 
 

@@ -2264,7 +2264,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
     else {
-        printf("unknown cong_ctrl, option is b, r, c, B, bbr+, bbr2+, P\n");
+        printf("unknown cong_ctrl, option is b, r, c, R, B, bbr+, bbr2+, P\n");
         return -1;
     }
     printf("congestion control flags: %x\n", cong_flags);

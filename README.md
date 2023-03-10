@@ -1,5 +1,14 @@
 # XQUIC for reinforcement learning research
 
+based on xquic 1.3 
+
+BoringSSL HEAD >>> 671ccb1a98fae26bf9c115068b2993418cecc800
+
+after download BoringSSL, you need check branch to special head
+
+`git checkout 671ccb1a98fae26bf9c115068b2993418cecc800`
+
+
 # XQUIC
 <img src="docs/images/xquic_logo.png" alt="xquic logo"/>
 
