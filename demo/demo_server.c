@@ -1305,7 +1305,7 @@ xqc_demo_svr_init_conn_settings(xqc_demo_svr_args_t *args)
         ccc = xqc_bbr_cb;
         break;
     case CC_TYPE_RLCC:
-        ccc = xqc_bbr_cb;
+        ccc = xqc_rlcc_cb;
         break;
     case CC_TYPE_CUBIC:
         ccc = xqc_cubic_cb;

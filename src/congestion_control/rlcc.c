@@ -8,6 +8,7 @@
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
 #include "src/congestion_control/xqc_sample.h"
+#include "src/transport/xqc_cid.h"
 #include "pthread.h"
 #include <time.h>
 #include <hiredis/hiredis.h>
@@ -28,7 +29,8 @@
 #define XQC_DEFAULT_PACING_RATE (((2 * XQC_MSS * 1000000ULL)/(XQC_kInitialRtt * 1000)))
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
-const uint64_t xqc_max = ~0;
+const uint64_t xqc_pacing_rate_max = ~0 / 3;
+const uint64_t xqc_cwnd_max = ~0 / 3;
 
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -47,7 +49,7 @@ xqc_rlcc_calc_pacing_rate_by_cwnd(xqc_rlcc_t *rlcc)
         srtt = XQC_kInitialRtt * 1000;
     }
 	rlcc->pacing_rate = (rlcc->cwnd * (uint64_t)MSEC2SEC / srtt);
-	rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_DEFAULT_PACING_RATE, xqc_max);
+	rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_DEFAULT_PACING_RATE, xqc_pacing_rate_max);
 	return;
 }
 
@@ -60,7 +62,7 @@ xqc_rlcc_calc_cwnd_by_pacing_rate(xqc_rlcc_t *rlcc)
         srtt = XQC_kInitialRtt * 1000;
     }
 	rlcc->cwnd = CWND_GAIN * (rlcc->pacing_rate * srtt / (uint64_t)MSEC2SEC);
-	rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, xqc_max);
+	rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, xqc_cwnd_max);
 	return;
 }
 
@@ -76,7 +78,7 @@ get_redis_conn(xqc_rlcc_t *rlcc)
 
 	if (!rlcc->redis_conn_listener || !rlcc->redis_conn_publisher)
 	{
-		printf("redisConnect error\n");
+        printf("redisConnect error\n");
 	}
 	else if (rlcc->redis_conn_listener->err)
 	{
@@ -93,12 +95,12 @@ get_redis_conn(xqc_rlcc_t *rlcc)
 }
 
 static void
-push_state(redisContext *conn, u_int32_t key, char *value)
+push_state(redisContext *conn, unsigned char * key, char *value)
 {
 	/* publish state */
 	redisReply *reply;
 
-	reply = redisCommand(conn, "PUBLISH rlccstate_%d %s", key, value);
+	reply = redisCommand(conn, "PUBLISH state_%s %s", key, value);
 
 	if (reply != NULL)
 		freeReplyObject(reply);
@@ -114,7 +116,7 @@ get_result_from_reply(redisReply *reply, xqc_rlcc_t *rlcc)
 	float pacing_rate_rate;
 	int cwnd_value;
 
-	int plan = 3; 
+	int plan = 1; 
 	/* TODO: use *function to replace plan */
 
 	// plan 1 : control by multiply rate; 
@@ -129,19 +131,21 @@ get_result_from_reply(redisReply *reply, xqc_rlcc_t *rlcc)
 		if (plan==1) {
 			// cwnd_rate : [0.5, 3], pacing_rate_rate : [0.5, 3]; if value is 0, means that set it auto
 			sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
-
+			printf("cwnd_rate %f, pacing_rate_rate:%f, cwnd:%ld, pacing_rate:%ld\n", cwnd_rate, pacing_rate_rate, rlcc->cwnd, rlcc->pacing_rate);
 			if (cwnd_rate != 0)
 			{
 				rlcc->cwnd *= cwnd_rate;
-				if (rlcc->cwnd < XQC_RLCC_MIN_WINDOW)
-				{
-					rlcc->cwnd = XQC_RLCC_MIN_WINDOW; // base cwnd
-				}
+				rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, xqc_cwnd_max);
 			}
 
 			if (pacing_rate_rate != 0)
 			{ // use pacing
+				// if (rlcc->pacing_rate/pacing_rate_rate < rlcc->pacing_rate)
+				// {
+				// 	rlcc->pacing_rate = 
+				// }
 				rlcc->pacing_rate *= pacing_rate_rate;
+				rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_DEFAULT_PACING_RATE, xqc_pacing_rate_max);
 				// TODO: base pacing rate needed
 			}
 
@@ -257,9 +261,9 @@ subscribe(redisContext *conn, xqc_rlcc_t *rlcc)
 	rlcc->reply = NULL;
 	int redis_err = 0;
 
-	if ((rlcc->reply = redisCommand(conn, "SUBSCRIBE rlccaction_%d", rlcc->rlcc_path_flag)) == NULL)
+	if ((rlcc->reply = redisCommand(conn, "SUBSCRIBE action_%s", rlcc->scid)) == NULL)
 	{
-		printf("Failed to Subscibe)\n");
+		printf("Failed to Subscibe\n");
 		redisFree(conn);
 	}
 	else
@@ -329,21 +333,22 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 
 	if (cc_params.customize_on)
 	{
-		rlcc->rlcc_path_flag = cc_params.rlcc_path_flag; // 客户端指定flag标识流
+		xqc_hex_dump(rlcc->scid, ctl_ctx->ctl_conn->initial_scid.cid_buf, ctl_ctx->ctl_conn->initial_scid.cid_len);
+		rlcc->scid[ctl_ctx->ctl_conn->initial_scid.cid_len * 2] = '\0';
 		rlcc->redis_host = cc_params.redis_host;
 		rlcc->redis_port = cc_params.redis_port;
+		printf("\n------scid %s, redis_host:%s\n", rlcc->scid, rlcc->redis_host);
 	}
 
 	get_redis_conn(rlcc);
 
-	if (rlcc->rlcc_path_flag)
+	// deploy
+	if (rlcc->scid)
 	{
-		push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, "state:init");
 		subscribe(rlcc->redis_conn_listener, rlcc);
-	}
-	else
+	}else
 	{
-		redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
+		redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error scid is null");
 		freeReplyObject(error);
 	}
 
@@ -431,7 +436,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 			rlcc->timestamp = current_time; // 更新时间戳
 			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
-			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
+			
+			rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
 			rlcc->sent_timestamp = current_time;
 			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
 			
@@ -439,7 +445,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 			rlcc->before_lost = sampler->lost_pkts;
 
-			if (rlcc->rlcc_path_flag)
+			if (rlcc->scid)
 			{	
 				uint32_t cwnd = rlcc->cwnd >> 10;
 				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
@@ -457,15 +463,17 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						sampler->delivery_rate,
 						rlcc->throughput, // delivery_rate 与 throughput 不作为状态，作为单独的奖励计算使用
 						sent_interval);
-				push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
+				push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
+				xqc_log(sampler->send_ctl->ctl_conn->log, XQC_LOG_DEBUG, 
+            		"{%s} publish msg\n", rlcc->scid);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal
 				pthread_cond_signal(&cond);
 				pthread_mutex_unlock(&mutex_lock);
 			}
 			else
-			{
-				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
+			{	
+				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc->scid is null");
 				freeReplyObject(error);
 			}
 		}
@@ -521,12 +529,12 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
 			
 			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
-			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
+			rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
 			
 			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
 			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 
-			if (rlcc->rlcc_path_flag)
+			if (rlcc->scid)
 			{	
 				uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
 				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
@@ -544,7 +552,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
 						rlcc->throughput,
 						sent_interval);
-				push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
+				push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal
 				pthread_cond_signal(&cond);
@@ -552,7 +560,8 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			}
 			else
 			{
-				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
+				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_scid is null");
+				
 				freeReplyObject(error);
 			}
 		}
@@ -608,12 +617,12 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			rlcc->sample_stop = rlcc->sample_start + rlcc->min_rtt; // double minRTT
 			
 			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
-			rlcc->throughput = 1e6 * sent_interval / (current_time - rlcc->sent_timestamp);
+			rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
 			
 			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
 			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 
-			if (rlcc->rlcc_path_flag)
+			if (rlcc->scid)
 			{	
 				uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
 				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
@@ -631,7 +640,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
 						rlcc->throughput,
 						sent_interval);
-				push_state(rlcc->redis_conn_publisher, rlcc->rlcc_path_flag, value);
+				push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
 				pthread_mutex_lock(&mutex_lock);
 				// send signal
 				pthread_cond_signal(&cond);
@@ -639,7 +648,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			}
 			else
 			{
-				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_path_flag is null");
+				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc->scid is null");
 				freeReplyObject(error);
 			}
 		}

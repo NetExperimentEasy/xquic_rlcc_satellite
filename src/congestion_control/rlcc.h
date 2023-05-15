@@ -45,6 +45,9 @@ typedef struct xqc_rlcc_s {
     // rlcc_flag : for mininet env
     uint32_t                rlcc_path_flag;
 
+    // rlcc_flag : for deploy env
+    unsigned char           scid[XQC_MAX_CID_LEN * 2 + 1];   //xqc_cid_str() xqc_send_ctl_t->xqc_connection_t->xqc_cid_t->cid_seq_num
+
     // satcc action space
     uint32_t                cwnd_int;
     uint8_t                 up_times;
