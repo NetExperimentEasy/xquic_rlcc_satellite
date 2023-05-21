@@ -8,6 +8,11 @@ after download BoringSSL, you need check branch to special head
 
 `git checkout 671ccb1a98fae26bf9c115068b2993418cecc800`
 
+test:
+
+./test_server -l e  > /dev/null
+
+./test_client -l e -a 127.0.0.1 -p 8443 -s 30485760 -c R -T -R 127.0.0.1:6379
 
 # XQUIC
 <img src="docs/images/xquic_logo.png" alt="xquic logo"/>

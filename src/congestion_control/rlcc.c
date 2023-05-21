@@ -29,16 +29,11 @@
 #define XQC_DEFAULT_PACING_RATE (((2 * XQC_MSS * 1000000ULL)/(XQC_kInitialRtt * 1000)))
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
-const uint64_t xqc_pacing_rate_max = ~0 / 3;
-const uint64_t xqc_cwnd_max = ~0 / 3;
+const uint64_t xqc_pacing_rate_max = ~0 >> 3;  // 太大会触发 Floating point exception (core dumped)
+const uint64_t xqc_cwnd_max = ~0 >> 3;
 
-static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;  // 移除cond限制
 static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* satcc action preset data */ 
-static int up_actions_list[8] = {30,150,750,3750,18750,93750,468750,2343750};
-static int down_actions_list[8] = {1,3,5,9,15,21,33,51};
-
 
 /* see xqc_pacing.c xqc_pacing_rate_calc */
 static void
@@ -114,142 +109,46 @@ get_result_from_reply(redisReply *reply, xqc_rlcc_t *rlcc)
 {
 	float cwnd_rate;
 	float pacing_rate_rate;
-	int cwnd_value;
-
-	int plan = 1; 
-	/* TODO: use *function to replace plan */
-
-	// plan 1 : control by multiply rate; 
-	// plan 2 : control by add rate; owl action space
-	// plan 3 : satcc action space
 
 	if (reply->type == REDIS_REPLY_ARRAY)
 	{
 
-		// printf("before cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
-
-		if (plan==1) {
-			// cwnd_rate : [0.5, 3], pacing_rate_rate : [0.5, 3]; if value is 0, means that set it auto
-			sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
-			printf("cwnd_rate %f, pacing_rate_rate:%f, cwnd:%ld, pacing_rate:%ld\n", cwnd_rate, pacing_rate_rate, rlcc->cwnd, rlcc->pacing_rate);
-			if (cwnd_rate != 0)
+		// cwnd_rate : [0.5, 3], pacing_rate_rate : [0.5, 3]; if value is 0, means that set it auto
+		sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
+		printf("cwnd_rate %f, pacing_rate_rate:%f, cwnd:%ld, pacing_rate:%ld\n", cwnd_rate, pacing_rate_rate, rlcc->cwnd, rlcc->pacing_rate);
+		if (cwnd_rate != 0)
+		{
+			if (xqc_cwnd_max / cwnd_rate < rlcc->cwnd) // 判断倍率会导致cwnd溢出的情况
 			{
+				rlcc->cwnd = xqc_cwnd_max - 1;
+			}else {
 				rlcc->cwnd *= cwnd_rate;
-				rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, xqc_cwnd_max);
 			}
+			rlcc->cwnd = xqc_clamp(rlcc->cwnd, XQC_RLCC_MIN_WINDOW, xqc_cwnd_max);
+		}
 
-			if (pacing_rate_rate != 0)
-			{ // use pacing
-				// if (rlcc->pacing_rate/pacing_rate_rate < rlcc->pacing_rate)
-				// {
-				// 	rlcc->pacing_rate = 
-				// }
+		if (pacing_rate_rate != 0)
+		{ // use pacing
+			if (xqc_pacing_rate_max / pacing_rate_rate < rlcc->pacing_rate) // 判断倍率会导致速率溢出的情况
+			{
+				rlcc->pacing_rate = xqc_pacing_rate_max - 1;
+			}else {
 				rlcc->pacing_rate *= pacing_rate_rate;
-				rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_DEFAULT_PACING_RATE, xqc_pacing_rate_max);
-				// TODO: base pacing rate needed
 			}
-
-			if (cwnd_rate == 0)
-			{
-				xqc_rlcc_calc_cwnd_by_pacing_rate(rlcc);
-			}
-
-			if (pacing_rate_rate == 0)
-			{ // use cwnd update pacing_rate
-				xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
-			}
-
-			if (rlcc->cwnd < XQC_RLCC_MIN_WINDOW)
-			{
-				rlcc->cwnd = XQC_RLCC_MIN_WINDOW; // base cwnd
-			}
+			// 上下限约束
+			rlcc->pacing_rate = xqc_clamp(rlcc->pacing_rate, XQC_DEFAULT_PACING_RATE, xqc_pacing_rate_max);
 		}
-		
-		if (plan == 2) {
-			// add mode only use cwnd
-			// cwnd_value : int , [-n, n]
-			int tmp;
-			sscanf(reply->element[2]->str, "%d", &cwnd_value);
-			tmp = cwnd_value > 0 ? cwnd_value : -cwnd_value;
-			if (rlcc->cwnd_int >= tmp || cwnd_value > 0){
-				rlcc->cwnd_int += cwnd_value;
-			}
-			if (rlcc->cwnd_int < XQC_RLCC_MIN_WINDOW_INT)
-			{
-				rlcc->cwnd_int = XQC_RLCC_MIN_WINDOW_INT; // base cwnd
-			}
-			rlcc->cwnd = rlcc->cwnd_int * XQC_RLCC_MSS;
+
+		if (cwnd_rate == 0)
+		{
+			xqc_rlcc_calc_cwnd_by_pacing_rate(rlcc);
+		}
+
+		if (pacing_rate_rate == 0)
+		{ // use cwnd update pacing_rate
 			xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
 		}
 
-		if (plan == 3) {
-			// satcc mode also only use cwnd
-			// cwnd_value : int , 1:up, -1:down ,0:stay
-			sscanf(reply->element[2]->str, "%d", &cwnd_value);
-			int a;
-			switch (cwnd_value)
-			{
-			case 1:
-				a = up_actions_list[rlcc->up_n] / rlcc->cwnd_int;
-				if(a==0) a=1;
-				rlcc->cwnd_int = rlcc->cwnd_int + a;
-
-				rlcc->up_times++;
-				rlcc->down_times = 0;
-				
-				// 根据延迟的不同来调节，基础延迟高的话(>=100ms)，连增要求小一点
-				int ifup;
-				if(rlcc->min_rtt<SAMPLE_INTERVAL){
-					ifup = 3;	// 反比例有四次应该足够微增到目标了
-				}else{
-					ifup = 1;
-				}
-				if(rlcc->up_times>ifup){	// 连增2次 下次开始加大力度，
-										// 连增越多，反比例周期越明显，但起步增速会变差； 连增小的话 反应会快一点
-					if(rlcc->up_n<7){
-						rlcc->up_n++;
-					}
-				}
-
-				break;
-
-			case -1:
-				if(rlcc->down_times<8){
-					if(rlcc->cwnd_int > down_actions_list[rlcc->down_times]){ //防减过猛
-						rlcc->cwnd_int -= down_actions_list[rlcc->down_times];
-					}
-				}else{
-					rlcc->cwnd_int -= (rlcc->cwnd_int>>1);
-				}
-
-				rlcc->down_times++;
-				rlcc->up_times = 0;
-
-				if(rlcc->up_n>0){
-					rlcc->up_n--;
-				}
-
-				break;
-
-			default:
-				if(rlcc->up_n>0){
-					rlcc->up_n--;
-				}
-				break;
-			}
-
-			
-			if (rlcc->cwnd_int < XQC_RLCC_MIN_WINDOW_INT)
-			{
-				rlcc->cwnd_int = XQC_RLCC_MIN_WINDOW_INT; // base cwnd
-			}
-
-			rlcc->cwnd = rlcc->cwnd_int * XQC_RLCC_MSS;
-
-			xqc_rlcc_calc_pacing_rate_by_cwnd(rlcc);
-		}
-
-		// printf("after cwnd is %d, pacing_rate is %d\n", rlcc->cwnd, rlcc->pacing_rate);
 	}
 
 	return;
@@ -283,14 +182,14 @@ get_action(void *arg)
 	void *reply = rlcc->reply;
 	while (1)
 	{
-		pthread_mutex_lock(&mutex_lock);
-		pthread_cond_wait(&cond, &mutex_lock);
+		// pthread_mutex_lock(&mutex_lock);
+		// pthread_cond_wait(&cond, &mutex_lock); // 移除cond限制
 		if ((redis_err = redisGetReply(rlcc->redis_conn_listener, &reply)) == REDIS_OK)
 		{
 			get_result_from_reply((redisReply *)reply, rlcc);
 			freeReplyObject(reply);
 		}
-		pthread_mutex_unlock(&mutex_lock);
+		// pthread_mutex_unlock(&mutex_lock);
 	}
 	return 0;
 }
@@ -337,7 +236,7 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 		rlcc->scid[ctl_ctx->ctl_conn->initial_scid.cid_len * 2] = '\0';
 		rlcc->redis_host = cc_params.redis_host;
 		rlcc->redis_port = cc_params.redis_port;
-		printf("\n------scid %s, redis_host:%s\n", rlcc->scid, rlcc->redis_host);
+		// printf("\n------scid %s, redis_host:%s\n", rlcc->scid, rlcc->redis_host);
 	}
 
 	get_redis_conn(rlcc);
@@ -352,7 +251,7 @@ xqc_rlcc_init(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params
 		freeReplyObject(error);
 	}
 
-	/* thread that get action from redis by cond signal */
+	/* thread that get action from redis */
 	pthread_t tid;
 	pthread_create(&tid, NULL, get_action, (void *)rlcc);
 	pthread_detach(tid);
@@ -424,235 +323,90 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 
 	probe_minrtt(rlcc, sampler);
 
-	int plan = 2; // plan 1 100ms; plan 2 double rtt sample
+	// double rtt sample method
 
-	/* TODO: use *function to replace plan */
-
-	if (plan == 1)
+	if (rlcc->sample_start > current_time)
 	{
-		/* plan1. 100ms fixed monitor interval (get data from xqc_sampler) */ 
-		if (rlcc->timestamp + SAMPLE_INTERVAL <= current_time)
-		{ // 100000 100ms
+		// before sample
+		rlcc->rtt = sampler->rtt;
+		rlcc->srtt = rlcc->rtt; /* starts with rtt, then update with sampler's srtt */
+		rlcc->inflight = sampler->bytes_inflight;
+		rlcc->lost = sampler->lost_pkts;
+		rlcc->delivery_rate = sampler->delivery_rate;
+		
+		rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
+		rlcc->sent_timestamp = current_time;
 
-			rlcc->timestamp = current_time; // 更新时间戳
-			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
-			
-			rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
-			rlcc->sent_timestamp = current_time;
-			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
-			
-			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
-			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
-			rlcc->before_lost = sampler->lost_pkts;
-
-			if (rlcc->scid)
-			{	
-				uint32_t cwnd = rlcc->cwnd >> 10;
-				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
-				char value[500] = {0};
-				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
-						cwnd,
-						pacing_rate,
-						sampler->rtt,
-						rlcc->min_rtt,
-						sampler->srtt,
-						sampler->bytes_inflight,
-						rlcc->lost_interval,
-						sampler->lost_pkts,
-						sampler->is_app_limited,
-						sampler->delivery_rate,
-						rlcc->throughput, // delivery_rate 与 throughput 不作为状态，作为单独的奖励计算使用
-						sent_interval);
-				push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
-				xqc_log(sampler->send_ctl->ctl_conn->log, XQC_LOG_DEBUG, 
-            		"{%s} publish msg\n", rlcc->scid);
-				pthread_mutex_lock(&mutex_lock);
-				// send signal
-				pthread_cond_signal(&cond);
-				pthread_mutex_unlock(&mutex_lock);
-			}
-			else
-			{	
-				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc->scid is null");
-				freeReplyObject(error);
-			}
-		}
+		rlcc->before_lost = sampler->lost_pkts;
 	}
 
-	if (plan == 2)
+	if (rlcc->sample_start <= current_time)
 	{
-		// plan2. minrtt+100ms sample method
-		// xqc_usec_t time_interval;
+		// sample
+		rlcc->rtt -= rlcc->rtt >> 2;
+		rlcc->rtt += (sampler->rtt >> 2);
 
-		if (rlcc->sample_start > current_time)
-		{
-			// before sample
-			rlcc->rtt = sampler->rtt;
-			rlcc->srtt = rlcc->rtt; /* starts with rtt, then update with sampler's srtt */
-			rlcc->inflight = sampler->bytes_inflight;
-			rlcc->lost = sampler->lost_pkts;
-			rlcc->delivery_rate = sampler->delivery_rate;
-			
-			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
-			rlcc->sent_timestamp = current_time;
+		rlcc->srtt -= rlcc->srtt >> 2;
+		rlcc->srtt += (sampler->srtt >> 2);
 
-			rlcc->before_lost = sampler->lost_pkts;
-		}
+		rlcc->inflight -= rlcc->inflight >> 2;
+		rlcc->inflight += (sampler->bytes_inflight >> 2);
 
-		if (rlcc->sample_start <= current_time)
-		{
-			// sample
-			rlcc->rtt -= rlcc->rtt >> 2;
-			rlcc->rtt += (sampler->rtt >> 2);
+		// printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
+		rlcc->lost -= rlcc->lost >> 2;
+		rlcc->lost += (sampler->lost_pkts >> 2);
+		// printf("rlcc lost after %d", rlcc->lost);
 
-			rlcc->srtt -= rlcc->srtt >> 2;
-			rlcc->srtt += (sampler->srtt >> 2);
-
-			rlcc->inflight -= rlcc->inflight >> 2;
-			rlcc->inflight += (sampler->bytes_inflight >> 2);
-
-			// printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
-			rlcc->lost -= rlcc->lost >> 2;
-			rlcc->lost += (sampler->lost_pkts >> 2);
-			// printf("rlcc lost after %d", rlcc->lost);
-
-			rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
-			rlcc->delivery_rate += (sampler->delivery_rate >> 2);
-		}
-
-		if (rlcc->sample_stop <= current_time)
-		{
-			// stop sample and send signal
-
-			rlcc->timestamp = current_time;
-			rlcc->sample_start = current_time + rlcc->min_rtt;
-			rlcc->sample_stop = rlcc->sample_start + xqc_min(rlcc->min_rtt, SAMPLE_INTERVAL);
-			
-			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
-			rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
-			
-			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
-			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
-
-			if (rlcc->scid)
-			{	
-				uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
-				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
-				char value[500] = {0};
-				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
-						cwnd,		
-						pacing_rate,
-						rlcc->rtt,
-						rlcc->min_rtt,
-						rlcc->srtt,
-						rlcc->inflight,
-						rlcc->lost_interval,
-						rlcc->lost,
-						sampler->is_app_limited,
-						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
-						rlcc->throughput,
-						sent_interval);
-				push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
-				pthread_mutex_lock(&mutex_lock);
-				// send signal
-				pthread_cond_signal(&cond);
-				pthread_mutex_unlock(&mutex_lock);
-			}
-			else
-			{
-				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc_scid is null");
-				
-				freeReplyObject(error);
-			}
-		}
+		rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
+		rlcc->delivery_rate += (sampler->delivery_rate >> 2);
 	}
 
-	if (plan == 3)
+	if (rlcc->sample_stop <= current_time)
 	{
-		// plan3. double rtt sample method
-		// xqc_usec_t time_interval;
+		// stop sample and send signal
 
-		if (rlcc->sample_start > current_time)
-		{
-			// before sample
-			rlcc->rtt = sampler->rtt;
-			rlcc->srtt = rlcc->rtt; /* starts with rtt, then update with sampler's srtt */
-			rlcc->inflight = sampler->bytes_inflight;
-			rlcc->lost = sampler->lost_pkts;
-			rlcc->delivery_rate = sampler->delivery_rate;
-			
-			rlcc->before_total_sent = sampler->send_ctl->ctl_bytes_send;
-			rlcc->sent_timestamp = current_time;
+		rlcc->timestamp = current_time;
+		rlcc->sample_start = current_time + rlcc->min_rtt;
+		rlcc->sample_stop = rlcc->sample_start + rlcc->min_rtt; // double minRTT
+		
+		uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
+		rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
+		
+		rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
+		rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
 
-			rlcc->before_lost = sampler->lost_pkts;
+		if (rlcc->scid)
+		{	
+			uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
+			uint32_t pacing_rate = rlcc->pacing_rate >> 10;
+			char value[500] = {0};
+			sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
+					cwnd,		
+					pacing_rate,
+					rlcc->rtt,
+					rlcc->min_rtt,
+					rlcc->srtt,
+					rlcc->inflight,
+					rlcc->lost_interval,
+					rlcc->lost,
+					sampler->is_app_limited,
+					rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
+					rlcc->throughput,
+					sent_interval);
+			push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
+			// pthread_mutex_lock(&mutex_lock);
+			// // send signal
+			// pthread_cond_signal(&cond); // 移除cond限制
+			// pthread_mutex_unlock(&mutex_lock);
 		}
-
-		if (rlcc->sample_start <= current_time)
+		else
 		{
-			// sample
-			rlcc->rtt -= rlcc->rtt >> 2;
-			rlcc->rtt += (sampler->rtt >> 2);
-
-			rlcc->srtt -= rlcc->srtt >> 2;
-			rlcc->srtt += (sampler->srtt >> 2);
-
-			rlcc->inflight -= rlcc->inflight >> 2;
-			rlcc->inflight += (sampler->bytes_inflight >> 2);
-
-			// printf("rlcc lost %d, >>2 %d", rlcc->lost, rlcc->lost >> 2);
-			rlcc->lost -= rlcc->lost >> 2;
-			rlcc->lost += (sampler->lost_pkts >> 2);
-			// printf("rlcc lost after %d", rlcc->lost);
-
-			rlcc->delivery_rate -= rlcc->delivery_rate >> 2;
-			rlcc->delivery_rate += (sampler->delivery_rate >> 2);
-		}
-
-		if (rlcc->sample_stop <= current_time)
-		{
-			// stop sample and send signal
-
-			rlcc->timestamp = current_time;
-			rlcc->sample_start = current_time + rlcc->min_rtt;
-			rlcc->sample_stop = rlcc->sample_start + rlcc->min_rtt; // double minRTT
-			
-			uint32_t sent_interval = sampler->send_ctl->ctl_bytes_send - rlcc->before_total_sent;
-			rlcc->throughput = (current_time - rlcc->sent_timestamp) > 0 ? 1e6 * sent_interval / (current_time - rlcc->sent_timestamp) : 0;
-			
-			rlcc->lost_interval = sampler->lost_pkts - rlcc->before_lost;
-			rlcc->lost_interval = xqc_max(rlcc->lost_interval, 0);  // <0 : not lost
-
-			if (rlcc->scid)
-			{	
-				uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
-				uint32_t pacing_rate = rlcc->pacing_rate >> 10;
-				char value[500] = {0};
-				sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
-						cwnd,		
-						pacing_rate,
-						rlcc->rtt,
-						rlcc->min_rtt,
-						rlcc->srtt,
-						rlcc->inflight,
-						rlcc->lost_interval,
-						rlcc->lost,
-						sampler->is_app_limited,
-						rlcc->delivery_rate,     // notice:此处是采样周期内平滑后的delivery_rate
-						rlcc->throughput,
-						sent_interval);
-				push_state(rlcc->redis_conn_publisher, rlcc->scid, value);
-				pthread_mutex_lock(&mutex_lock);
-				// send signal
-				pthread_cond_signal(&cond);
-				pthread_mutex_unlock(&mutex_lock);
-			}
-			else
-			{
-				redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc->scid is null");
-				freeReplyObject(error);
-			}
+			redisReply *error = redisCommand(rlcc->redis_conn_publisher, "SET error rlcc->scid is null");
+			freeReplyObject(error);
 		}
 	}
+	printf("without changing, cwnd:%ld, pacing_rate:%ld\n", rlcc->cwnd, rlcc->pacing_rate);
+
 	return;
 }
 
