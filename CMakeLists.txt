@@ -339,6 +339,8 @@ if (XQC_ENABLE_TESTING)
     ### test client/server ###
     add_executable(test_server tests/test_server.c ${GETOPT_SOURCES})
     add_executable(test_client tests/test_client.c ${GETOPT_SOURCES})
+    add_executable(sate_test_server tests/sate_test_server.c ${GETOPT_SOURCES})
+    add_executable(sate_test_client tests/sate_test_client.c ${GETOPT_SOURCES})
 
     ### hq demo client/server ###
     set(

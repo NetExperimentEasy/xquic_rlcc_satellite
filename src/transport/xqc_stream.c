@@ -1179,7 +1179,7 @@ xqc_stream_send(xqc_stream_t *stream, unsigned char *send_data, size_t send_data
 
         if (pkt_type == XQC_PTYPE_0RTT && conn->zero_rtt_count >= XQC_PACKET_0RTT_MAX_COUNT) {
             xqc_log(conn->log, XQC_LOG_DEBUG, "|too many 0rtt packets|zero_rtt_count:%ud|", conn->zero_rtt_count);
-            ret = -XQC_EAGAIN;
+            ret = -XQC_EAGAIN;   // 610
             goto do_buff;
         }
 

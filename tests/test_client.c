@@ -889,11 +889,11 @@ xqc_client_stream_send(xqc_stream_t *stream, void *user_data)
     if (user_stream->send_offset < user_stream->send_body_len) {
         ret = xqc_stream_send(stream, user_stream->send_body + user_stream->send_offset, user_stream->send_body_len - user_stream->send_offset, fin);
         if (ret < 0) {
-            printf("xqc_stream_send error %zd\n", ret);
+            // printf("xqc_stream_send error %zd\n", ret);
             return 0;
-
         } else {
-            user_stream->send_offset += ret;
+            // stop offset change
+            // user_stream->send_offset += ret;
             printf("xqc_stream_send offset=%"PRIu64"\n", user_stream->send_offset);
         }
     }
@@ -972,7 +972,7 @@ xqc_client_stream_read_notify(xqc_stream_t *stream, void *user_data)
 
         read_sum += read;
         user_stream->recv_body_len += read;
-
+        printf("fin:%d, read:%ld\n", fin, read);
     } while (read > 0 && !fin);
 
     printf("xqc_stream_recv read:%zd, offset:%zu, fin:%d\n", read_sum, user_stream->recv_body_len, fin);
@@ -1828,6 +1828,8 @@ xqc_client_timeout_callback(int fd, short what, void *arg)
         printf("scheduled a new stream request\n");
         return;
     }
+
+    // g_conn_timeout = 10;
 
     if (xqc_now() - g_last_sock_op_time < (uint64_t)g_conn_timeout * 1000000) {
         struct timeval tv;

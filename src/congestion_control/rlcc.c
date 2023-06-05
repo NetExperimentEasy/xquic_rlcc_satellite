@@ -29,10 +29,10 @@
 #define XQC_DEFAULT_PACING_RATE (((2 * XQC_MSS * 1000000ULL)/(XQC_kInitialRtt * 1000)))
 
 const float xqc_rlcc_init_pacing_gain = 2.885;
-const uint64_t xqc_pacing_rate_max = ~0 >> 3;  // 太大会触发 Floating point exception (core dumped)
-const uint64_t xqc_cwnd_max = ~0 >> 3;
+const uint64_t xqc_pacing_rate_max = (~0) / (uint64_t)MSEC2SEC;  // 后续会乘这个值，太大会触发 Floating point exception (core dumped)
+const uint64_t xqc_cwnd_max = (~0) / (uint64_t)MSEC2SEC;
 
-static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;  // 移除cond限制
+// static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;  // 移除cond限制
 static pthread_mutex_t mutex_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* see xqc_pacing.c xqc_pacing_rate_calc */
@@ -115,7 +115,7 @@ get_result_from_reply(redisReply *reply, xqc_rlcc_t *rlcc)
 
 		// cwnd_rate : [0.5, 3], pacing_rate_rate : [0.5, 3]; if value is 0, means that set it auto
 		sscanf(reply->element[2]->str, "%f,%f", &cwnd_rate, &pacing_rate_rate);
-		printf("cwnd_rate %f, pacing_rate_rate:%f, cwnd:%ld, pacing_rate:%ld\n", cwnd_rate, pacing_rate_rate, rlcc->cwnd, rlcc->pacing_rate);
+		// printf("cwnd_rate %f, pacing_rate_rate:%f, cwnd:%lu, pacing_rate:%lu\n", cwnd_rate, pacing_rate_rate, rlcc->cwnd, rlcc->pacing_rate);
 		if (cwnd_rate != 0)
 		{
 			if (xqc_cwnd_max / cwnd_rate < rlcc->cwnd) // 判断倍率会导致cwnd溢出的情况
@@ -380,7 +380,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			uint32_t cwnd = rlcc->cwnd >> 10; /* TODO, uint64 >> 10 may overflow (rlccenv recv type is float32) */
 			uint32_t pacing_rate = rlcc->pacing_rate >> 10;
 			char value[500] = {0};
-			sprintf(value, "%d;%d;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
+			sprintf(value, "%u;%u;%ld;%ld;%ld;%d;%d;%d;%d;%d;%d;%d",
 					cwnd,		
 					pacing_rate,
 					rlcc->rtt,
@@ -405,7 +405,7 @@ xqc_rlcc_on_ack(void *cong_ctl, xqc_sample_t *sampler)
 			freeReplyObject(error);
 		}
 	}
-	printf("without changing, cwnd:%ld, pacing_rate:%ld\n", rlcc->cwnd, rlcc->pacing_rate);
+	printf("without changing, cwnd:%lu, pacing_rate:%lu\n", rlcc->cwnd, rlcc->pacing_rate);
 
 	return;
 }
